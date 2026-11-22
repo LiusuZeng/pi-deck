@@ -5,6 +5,7 @@ import {
   isAllWorkPrimaryView,
   isWorkspaceWorkPrimaryView,
   replaceSessionRouteId,
+  savedAnswersView,
   sessionView,
   workflowSidebarView,
   workflowView,
@@ -88,6 +89,19 @@ describe("primary renderer view transitions", () => {
       ...session,
       sessionId: "runtime-a-resumed",
     });
+  });
+
+  it("preserves Work origin while browsing workspace Saved answers", () => {
+    const origin = workspaceWorkView("workspace-a");
+    const saved = savedAnswersView("workspace-a", origin, "output-a");
+
+    expect(saved).toEqual({
+      kind: "savedAnswers",
+      workspaceId: "workspace-a",
+      selectedOutputId: "output-a",
+      origin,
+    });
+    expect(workOriginForPrimaryView(saved, "workspace-b")).toBe(origin);
   });
 
   it("preserves Work origin while navigating workflow surfaces", () => {

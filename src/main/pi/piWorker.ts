@@ -1,5 +1,9 @@
 import { EventEmitter } from "node:events";
-import { spawnJsonlRpcClient, type JsonlRpcClient } from "./jsonlClient.js";
+import {
+  JsonlRpcNotificationTimeoutError,
+  spawnJsonlRpcClient,
+  type JsonlRpcClient,
+} from "./jsonlClient.js";
 import type {
   ExtensionUiResponse,
   JsonObject,
@@ -43,7 +47,7 @@ export type PiWorkerHealth = "starting" | "healthy" | "unhealthy" | "closed";
 
 export class PiWorker {
   readonly runtimeId: RuntimeSessionId;
-  readonly client: JsonlRpcClient;
+  private readonly client: JsonlRpcClient;
   readonly pid: number | undefined;
   private readonly events = new EventEmitter();
   private readonly recentDiagnostics: RuntimeDiagnosticEvent[] = [];
@@ -52,7 +56,10 @@ export class PiWorker {
   private exitCode: number | null | undefined;
   private signal: NodeJS.Signals | null | undefined;
   private isClosingIntentionally = false;
+  private fatalTransportError: Error | undefined;
+  private shutdownPromise: Promise<void> | undefined;
   private workerExitEmitted = false;
+  private notificationWriteFault: JsonlRpcNotificationTimeoutError | undefined;
   /** Resolves exactly when the child is terminal (or spawn itself failed). */
   private readonly exitPromise: Promise<void>;
   private resolveExit!: () => void;
@@ -66,11 +73,15 @@ export class PiWorker {
     const args = options.args ?? ["--mode", "rpc"];
     const clientOptions: {
       requestTimeoutMs?: number;
+      notificationTimeoutMs?: number;
       stderrBufferBytes?: number;
       commandProtocol?: "command-field" | "type-field";
     } = {};
     if (options.requestTimeoutMs !== undefined) {
       clientOptions.requestTimeoutMs = options.requestTimeoutMs;
+    }
+    if (options.notificationTimeoutMs !== undefined) {
+      clientOptions.notificationTimeoutMs = options.notificationTimeoutMs;
     }
     if (options.stderrBufferBytes !== undefined) {
       clientOptions.stderrBufferBytes = options.stderrBufferBytes;
@@ -111,19 +122,27 @@ export class PiWorker {
     this.client.typedOn("diagnostic", (message) => {
       this.addDiagnostic("warn", message.trimEnd() || "RPC diagnostic");
     });
+    this.client.typedOn("transportError", (error) => {
+      this.terminateAfterFatalTransportError(error);
+    });
+    this.client.typedOn("fatal", ({ error }) => {
+      this.terminateAfterFatalTransportError(error);
+    });
     this.client.typedOn("close", ({ code, signal }) => {
       this.exitCode = code;
       this.signal = signal;
 
-      if (this.isClosingIntentionally) {
+      if (this.isClosingIntentionally && !this.fatalTransportError) {
         this.health = "closed";
         this.addDiagnostic(
           "info",
           `RPC worker closed (code=${code ?? "null"}, signal=${signal ?? "null"})`,
         );
       } else {
-        this.health = code === 0 ? "closed" : "unhealthy";
-        const level = code === 0 ? "info" : "error";
+        this.health =
+          code === 0 && !this.fatalTransportError ? "closed" : "unhealthy";
+        const level =
+          code === 0 && !this.fatalTransportError ? "info" : "error";
         this.addDiagnostic(
           level,
           `RPC worker exited (code=${code ?? "null"}, signal=${signal ?? "null"})`,
@@ -149,12 +168,12 @@ export class PiWorker {
       runtimeId: this.runtimeId,
       code,
       signal,
-      intentional: this.isClosingIntentionally,
+      intentional: this.isClosingIntentionally && !this.fatalTransportError,
     } as RuntimeEvent);
   }
 
   async getState(): Promise<PiState> {
-    const state = (await this.client.request("get_state")) as PiState;
+    const state = (await this.request("get_state")) as PiState;
     return { ...state, runtimeId: this.runtimeId };
   }
 
@@ -168,11 +187,11 @@ export class PiWorker {
   }
 
   getSessionStats(): Promise<unknown> {
-    return this.client.request("get_session_stats");
+    return this.request("get_session_stats");
   }
 
   async getMessages(): Promise<PiMessage[]> {
-    const response = await this.client.request("get_messages");
+    const response = await this.request("get_messages");
     const messages = Array.isArray(response)
       ? response
       : response &&
@@ -188,31 +207,52 @@ export class PiWorker {
   }
 
   async prompt(input: PromptInput): Promise<void> {
-    await this.client.request("prompt", toJsonObject(input));
+    await this.request("prompt", toJsonObject(input));
   }
 
   async steer(input: PromptInput): Promise<void> {
-    await this.client.request("steer", toJsonObject(input));
+    await this.request("steer", toJsonObject(input));
   }
 
   async followUp(input: PromptInput): Promise<void> {
-    await this.client.request("follow_up", toJsonObject(input));
+    await this.request("follow_up", toJsonObject(input));
   }
 
   async abort(): Promise<void> {
-    await this.client.request("abort");
+    await this.request("abort");
   }
 
   /** Send Pi's response-only extension UI record; no command response exists. */
   async respondToExtensionUi(response: ExtensionUiResponse): Promise<void> {
-    await this.client.send({
-      type: "extension_ui_response",
-      ...response,
-    });
+    if (this.notificationWriteFault !== undefined) {
+      throw this.notificationWriteFault;
+    }
+    try {
+      await this.client.send({
+        type: "extension_ui_response",
+        ...response,
+      });
+    } catch (error) {
+      if (error instanceof JsonlRpcNotificationTimeoutError) {
+        // The old bytes can still be queued in stdin. Quarantine this worker
+        // instead of allowing a second response to race their late delivery.
+        this.notificationWriteFault = error;
+        void this.closeAndWait().catch(() => undefined);
+      }
+      throw error;
+    }
   }
 
-  async request(command: string, params?: JsonObject): Promise<unknown> {
-    return this.client.request(command, params);
+  async request<T extends JsonValue = JsonValue>(
+    command: string,
+    params?: JsonObject,
+  ): Promise<T> {
+    // A timed-out notification can still be queued in stdin, so no later RPC
+    // write is safe until the quarantined worker has actually exited.
+    if (this.notificationWriteFault !== undefined) {
+      throw this.notificationWriteFault;
+    }
+    return this.client.request<T>(command, params);
   }
 
   /**
@@ -222,16 +262,39 @@ export class PiWorker {
    * a signal was sent, not that Pi has stopped writing its JSONL.
    */
   async closeAndWait(): Promise<void> {
+    if (!this.fatalTransportError) {
+      this.isClosingIntentionally = true;
+    }
+    await this.requestTerminationAndWait();
+  }
+
+  private terminateAfterFatalTransportError(error: Error): void {
+    if (!this.fatalTransportError) {
+      this.fatalTransportError = error;
+      this.health = "unhealthy";
+      this.addDiagnostic("error", error.message);
+    }
+    void this.requestTerminationAndWait();
+  }
+
+  private requestTerminationAndWait(): Promise<void> {
+    if (this.shutdownPromise) {
+      return this.shutdownPromise;
+    }
+
+    this.shutdownPromise = this.terminateChildWithEscalation();
+    return this.shutdownPromise;
+  }
+
+  private async terminateChildWithEscalation(): Promise<void> {
     const child = this.client.child;
     if (child.exitCode !== null || child.signalCode !== null) {
       await this.waitForChildExit();
       return;
     }
 
-    // Mark intent before signalling so an immediate exit remains a clean
-    // shutdown. Do not use `child.killed` as a lifecycle predicate: it flips
-    // after SIGTERM even when the child ignores that signal.
-    this.isClosingIntentionally = true;
+    // Do not use `child.killed` as a lifecycle predicate: it flips after
+    // SIGTERM even when the child ignores that signal.
     try {
       child.kill("SIGTERM");
     } catch {

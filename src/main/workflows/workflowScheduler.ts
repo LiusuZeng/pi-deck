@@ -94,6 +94,12 @@ interface ActiveStep {
 
 type RuntimeOwnership = { runtimeId: string; active: ActiveStep };
 
+interface ActiveOccurrence {
+  runId: string;
+  occurrenceId: string;
+  claim?: WorkflowRuntimeOwnershipClaim | undefined;
+}
+
 const conditionJudgeSchema = z
   .object({
     decision: z.enum(["yes", "no", "unsure"]),
@@ -903,14 +909,7 @@ export interface WorkflowOccurrenceSchedulerDependencies extends Omit<
 export class WorkflowOccurrenceScheduler {
   private readonly runs = new Map<string, WorkflowRoleRun>();
   /** A runtime is owned by one occurrence; deleting it before mutation makes late events harmless. */
-  private readonly active = new Map<
-    string,
-    {
-      runId: string;
-      occurrenceId: string;
-      claim?: WorkflowRuntimeOwnershipClaim | undefined;
-    }
-  >();
+  private readonly active = new Map<string, ActiveOccurrence>();
   private readonly now: () => number;
   /** Serialize read-modify-write transitions for each canonical run. */
   private readonly mutationTails = new Map<string, Promise<unknown>>();
@@ -1034,6 +1033,16 @@ export class WorkflowOccurrenceScheduler {
     expectedRevision: number,
   ): Promise<WorkflowRoleRun> {
     const releaseStop = this.reserveStop(runId, expectedRevision);
+    const preemptiveClose = this.current(runId)
+      .then(async (observed) => {
+        if (
+          observed !== undefined &&
+          observed.revision >= expectedRevision &&
+          observed.status !== "stopped"
+        )
+          await this.cancelActiveRun(runId);
+      })
+      .catch(() => undefined);
     try {
       return await this.serialize(runId, async () => {
         const run = await this.current(runId);
@@ -1047,13 +1056,8 @@ export class WorkflowOccurrenceScheduler {
             `Workflow run changed before stop: expected revision ${expectedRevision}, found ${run.revision}.`,
           );
         if (run.status === "stopped") return run;
-        const owned = [...this.active.entries()].filter(
-          ([, owner]) => owner.runId === runId,
-        );
-        for (const [runtimeId, owner] of owned) {
-          this.active.delete(runtimeId);
-          await this.closeAndReleaseQuietly(runtimeId, owner);
-        }
+        await preemptiveClose;
+        await this.cancelActiveRun(runId);
         const stopped = await this.save(stopWorkflowRoleRun(run, this.now()));
         this.cleanupLifecycleWake(runId, stopped);
         return stopped;
@@ -1239,6 +1243,26 @@ export class WorkflowOccurrenceScheduler {
       (stopRevision) => stopRevision <= revision,
     );
   }
+  private hasStopIntent(run: WorkflowRoleRun): boolean {
+    return this.hasPendingStopAtOrBefore(run.id, run.revision);
+  }
+  private async cancelActiveRun(runId: string): Promise<void> {
+    const owned = [...this.active.entries()].filter(
+      ([, owner]) => owner.runId === runId,
+    );
+    for (const [runtimeId, owner] of owned) {
+      await this.closeActiveRuntime(runtimeId, owner);
+    }
+  }
+  private async closeActiveRuntime(
+    runtimeId: string,
+    owner: ActiveOccurrence,
+  ): Promise<boolean> {
+    if (this.active.get(runtimeId) !== owner) return false;
+    this.active.delete(runtimeId);
+    await this.closeAndReleaseQuietly(runtimeId, owner);
+    return true;
+  }
   private serialize<T>(runId: string, operation: () => Promise<T>): Promise<T> {
     const previous = this.mutationTails.get(runId) ?? Promise.resolve();
     const result = previous.catch(() => undefined).then(operation);
@@ -1268,6 +1292,7 @@ export class WorkflowOccurrenceScheduler {
       if (occurrence.role === "human") continue;
       let runtimeId: string | undefined;
       let claim: WorkflowRuntimeOwnershipClaim | undefined;
+      let owner: ActiveOccurrence | undefined;
       try {
         const session = await this.dependencies.createSession(run.workspaceId, {
           scheduler: "occurrence",
@@ -1277,6 +1302,10 @@ export class WorkflowOccurrenceScheduler {
         });
         runtimeId = session.runtimeId;
         claim = session.workflowOwnershipClaim;
+        if (this.hasStopIntent(run)) {
+          await this.closeAndReleaseQuietly(runtimeId, { claim });
+          return run;
+        }
         const sessionFile = session.state.sessionFile;
         if (typeof sessionFile !== "string" || !sessionFile.trim()) {
           throw new Error(
@@ -1294,11 +1323,16 @@ export class WorkflowOccurrenceScheduler {
             sessionFile,
           ),
         );
-        this.active.set(runtimeId, {
+        if (this.hasStopIntent(run)) {
+          await this.closeAndReleaseQuietly(runtimeId, { claim });
+          return run;
+        }
+        owner = {
           runId,
           occurrenceId: occurrence.id,
           claim,
-        });
+        };
+        this.active.set(runtimeId, owner);
         const node = run.definition.nodes.find(
           (item) => item.id === occurrence.nodeId,
         );
@@ -1319,12 +1353,18 @@ export class WorkflowOccurrenceScheduler {
             ...(thinkingLevel ? { thinkingLevel } : {}),
           });
         }
+        if (this.hasStopIntent(run)) {
+          await this.closeActiveRuntime(runtimeId, owner);
+          return run;
+        }
+        if (this.active.get(runtimeId) !== owner) return run;
         await this.dependencies.prompt(runtimeId, prompt);
       } catch (error) {
         if (runtimeId) {
-          this.active.delete(runtimeId);
-          await this.closeAndReleaseQuietly(runtimeId, { claim });
+          if (owner) await this.closeActiveRuntime(runtimeId, owner);
+          else await this.closeAndReleaseQuietly(runtimeId, { claim });
         }
+        if (this.hasStopIntent(run)) return run;
         const lifecycleConflict =
           isWorkspaceRuntimeLifecycleConflictError(error) ||
           isArchivedWorkspaceError(error) ||

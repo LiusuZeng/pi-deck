@@ -25,6 +25,9 @@ export class ExtensionUiRequestRegistry<
     string,
     Map<string, ClaimedExtensionUiRequest<TRequest>>
   >();
+  // A notification write that timed out may still reach Pi later. Do not
+  // authorize any more dialogs for that runtime until its worker has exited.
+  private readonly quarantinedRuntimes = new Set<string>();
 
   constructor(
     private readonly options: {
@@ -36,7 +39,8 @@ export class ExtensionUiRequestRegistry<
     },
   ) {}
 
-  register(runtimeId: string, request: TRequest): void {
+  register(runtimeId: string, request: TRequest): boolean {
+    if (this.quarantinedRuntimes.has(runtimeId)) return false;
     // Reusing an id starts a new authorization lifecycle. An older async
     // response must not be able to restore or complete over this request.
     this.deleteInFlight(runtimeId, request.id);
@@ -55,6 +59,25 @@ export class ExtensionUiRequestRegistry<
     requests.set(request.id, record);
     this.requests.set(runtimeId, requests);
     this.schedule(record);
+    return true;
+  }
+
+  /**
+   * Discard every current dialog and reject newly received dialog events while
+   * a response write has unknown delivery. Call releaseRuntime only after the
+   * corresponding worker is no longer live.
+   */
+  quarantineRuntime(runtimeId: string): void {
+    this.clearRuntime(runtimeId);
+    this.quarantinedRuntimes.add(runtimeId);
+  }
+
+  isRuntimeQuarantined(runtimeId: string): boolean {
+    return this.quarantinedRuntimes.has(runtimeId);
+  }
+
+  releaseRuntime(runtimeId: string): void {
+    this.quarantinedRuntimes.delete(runtimeId);
   }
 
   peek(runtimeId: string, requestId: string): TRequest | undefined {

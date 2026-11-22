@@ -62,6 +62,17 @@ describe("model discovery child ownership", () => {
 
   it("awaits terminal child confirmation on successful discovery", async () => {
     const { worker, exit } = mockWorker();
+    worker.request.mockImplementation((command: string) =>
+      Promise.resolve(
+        command === "get_available_models"
+          ? {
+              models: [
+                { id: "runtime-model", provider: "runtime", name: "Runtime" },
+              ],
+            }
+          : { levels: ["medium"] },
+      ),
+    );
     let settled = false;
     const discovery = discoverPiRuntimeModels(options).finally(() => {
       settled = true;
@@ -70,6 +81,27 @@ describe("model discovery child ownership", () => {
     expect(settled).toBe(false);
     exit.resolve();
     await expect(discovery).resolves.toMatchObject({ thinkingLevel: "medium" });
+  });
+
+  it("marks a successful empty RPC inventory as partial discovery", async () => {
+    const { worker, exit } = mockWorker();
+    const outcome = discoverPiRuntimeModels(options).catch(
+      (error: unknown) => error,
+    );
+
+    await vi.waitFor(() => expect(worker.closeSession).toHaveBeenCalledOnce());
+    exit.resolve();
+
+    const error = await outcome;
+    expect(error).toBeInstanceOf(PiRuntimeModelDiscoveryError);
+    expect(error).toMatchObject({
+      failedCommands: [],
+      partialResult: {
+        models: [],
+        thinkingLevel: "medium",
+        thinkingLevels: ["medium"],
+      },
+    });
   });
 
   it("awaits terminal child confirmation on RPC failure", async () => {

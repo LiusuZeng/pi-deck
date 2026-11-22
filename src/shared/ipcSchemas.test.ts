@@ -29,6 +29,9 @@ import {
   multitaskTaskSummarySchema,
   pickProjectResultSchema,
   projectRefSchema,
+  savedAnswerListRequestSchema,
+  savedAnswerReviewRequestSchema,
+  savedAnswerSaveRequestSchema,
   chatSessionSummarySchema,
   workspaceCreateRequestSchema,
   workspaceArchiveSessionRequestSchema,
@@ -83,6 +86,16 @@ describe("IPC schemas", () => {
         },
       }),
     ).toMatchObject({ ok: false });
+    expect(
+      apiResponseSchema(appSettingsSchema).parse({
+        ok: false,
+        error: {
+          code: "INTERNAL_ERROR",
+          message: "RPC command timed out before response: prompt",
+          deliveryStatus: "unknown",
+        },
+      }),
+    ).toMatchObject({ ok: false, error: { deliveryStatus: "unknown" } });
   });
 
   it("validates a compact local-only bootstrap DTO", () => {
@@ -133,6 +146,39 @@ describe("IPC schemas", () => {
         ],
       }),
     ).toThrow();
+  });
+
+  it("bounds Saved answers requests and rejects renderer filesystem authority", () => {
+    const request = {
+      requestId: "00000000-0000-4000-8000-000000000001",
+      runtimeId: "runtime-1",
+      assistantText: "Useful answer",
+      title: "Saved answer",
+    };
+    expect(savedAnswerSaveRequestSchema.parse(request)).toEqual(request);
+    expect(() =>
+      savedAnswerSaveRequestSchema.parse({
+        ...request,
+        sourcePath: "/tmp/untrusted.md",
+      }),
+    ).toThrow();
+    expect(
+      savedAnswerListRequestSchema.parse({ query: "rollback plan" }),
+    ).toEqual({
+      query: "rollback plan",
+    });
+    expect(() =>
+      savedAnswerListRequestSchema.parse({ workspaceId: "not-a-uuid" }),
+    ).toThrow();
+    expect(
+      savedAnswerReviewRequestSchema.parse({
+        workspaceId: "00000000-0000-4000-8000-000000000004",
+        outputId: "00000000-0000-4000-8000-000000000002",
+        revisionId: "00000000-0000-4000-8000-000000000003",
+        action: "changes-requested",
+        note: "Add rollback steps",
+      }),
+    ).toMatchObject({ action: "changes-requested" });
   });
 
   it("accepts only a workspace-scoped persisted session fork request", () => {

@@ -5,6 +5,7 @@ import {
   appSettingsSchema,
   ipcChannels,
 } from "../../shared/ipcSchemas.js";
+import { JsonlRpcDeliveryError } from "../pi/jsonlClient.js";
 import { registerValidatedIpc } from "./registerIpc.js";
 
 const electronMock = vi.hoisted(() => {
@@ -62,6 +63,62 @@ describe("registerValidatedIpc", () => {
     });
     expect(handler).not.toHaveBeenCalled();
     expect(errors.join("\n")).toContain("IPC settings:update rejected");
+  });
+
+  it("carries unknown delivery classification for timed out RPC commands", async () => {
+    registerValidatedIpc({
+      channel: ipcChannels.chatPrompt,
+      requestSchema: z.object({ runtimeId: z.string() }).strict(),
+      responseSchema: z.void(),
+      diagnostics: { recordError: () => undefined },
+      handler: () => {
+        throw new JsonlRpcDeliveryError(
+          "RPC command timed out before response: prompt",
+          "unknown",
+        );
+      },
+    });
+
+    const ipcHandler = electronMock.handlers.get(ipcChannels.chatPrompt);
+    await expect(ipcHandler?.({}, { runtimeId: "runtime-1" })).resolves.toEqual(
+      {
+        ok: false,
+        error: {
+          code: "INTERNAL_ERROR",
+          message: "RPC command timed out before response: prompt",
+          deliveryStatus: "unknown",
+        },
+      },
+    );
+  });
+
+  it("preserves unknown delivery classification across a module boundary", async () => {
+    registerValidatedIpc({
+      channel: ipcChannels.chatPrompt,
+      requestSchema: z.object({ runtimeId: z.string() }).strict(),
+      responseSchema: z.void(),
+      diagnostics: { recordError: () => undefined },
+      handler: () => {
+        // A cross-realm Electron error can retain its own fields without
+        // inheriting this main process's Error.prototype.
+        throw {
+          message: "RPC command timed out before response: prompt",
+          deliveryStatus: "unknown",
+        };
+      },
+    });
+
+    const ipcHandler = electronMock.handlers.get(ipcChannels.chatPrompt);
+    await expect(ipcHandler?.({}, { runtimeId: "runtime-1" })).resolves.toEqual(
+      {
+        ok: false,
+        error: {
+          code: "INTERNAL_ERROR",
+          message: "RPC command timed out before response: prompt",
+          deliveryStatus: "unknown",
+        },
+      },
+    );
   });
 
   it("validates handler responses before returning success", async () => {

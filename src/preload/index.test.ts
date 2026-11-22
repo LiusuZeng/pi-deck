@@ -70,6 +70,43 @@ describe("preload PiDeck API validation", () => {
     expect(electronMock.ipcRenderer.off).toHaveBeenCalledOnce();
   });
 
+  it("exposes strict Saved answers IPC without renderer paths", async () => {
+    const request = {
+      requestId: "00000000-0000-4000-8000-000000000001",
+      runtimeId: "runtime-1",
+      assistantText: "Useful answer",
+      title: "Saved answer",
+    };
+    electronMock.ipcRenderer.invoke.mockResolvedValue({
+      ok: true,
+      data: {
+        outputId: "00000000-0000-4000-8000-000000000002",
+        revisionId: "00000000-0000-4000-8000-000000000003",
+        workspaceId: "00000000-0000-4000-8000-000000000004",
+        title: request.title,
+        createdAtMs: 1,
+        updatedAtMs: 1,
+        displayNumber: 1,
+        revisionCount: 1,
+        reviewState: "unreviewed",
+        size: request.assistantText.length,
+        origin: "manual-save",
+      },
+    });
+
+    await api.savedAnswers.save(request);
+    expect(electronMock.ipcRenderer.invoke).toHaveBeenCalledWith(
+      "savedAnswers:save",
+      request,
+    );
+    expect(() =>
+      api.savedAnswers.save({
+        ...request,
+        sourcePath: "/tmp/untrusted.md",
+      } as never),
+    ).toThrow();
+  });
+
   it("rejects invalid attachment picker requests before invoking IPC", () => {
     expect(() =>
       api.attachments.pickFiles({
@@ -177,6 +214,53 @@ describe("preload PiDeck API validation", () => {
         target: "/sessions/not-authorized.jsonl",
       } as never),
     ).toThrow();
+  });
+
+  it("returns unknown prompt delivery status for context-bridge-safe renderer handling", async () => {
+    electronMock.ipcRenderer.invoke.mockResolvedValue({
+      ok: false,
+      error: {
+        code: "INTERNAL_ERROR",
+        message: "RPC command timed out before response: prompt",
+        deliveryStatus: "unknown",
+      },
+    });
+
+    await expect(
+      api.chat.prompt({
+        runtimeId: "runtime-1",
+        text: "Do something once",
+        destination: "parent",
+      }),
+    ).resolves.toEqual({
+      deliveryStatus: "unknown",
+      message: "RPC command timed out before response: prompt",
+    });
+    expect(electronMock.ipcRenderer.invoke).toHaveBeenCalledWith(
+      "chat:prompt",
+      {
+        runtimeId: "runtime-1",
+        text: "Do something once",
+        destination: "parent",
+      },
+    );
+  });
+
+  it("keeps definite prompt failures on the ordinary rejection path", async () => {
+    electronMock.ipcRenderer.invoke.mockResolvedValue({
+      ok: false,
+      error: {
+        code: "INTERNAL_ERROR",
+        message: "Pi rejected the prompt",
+      },
+    });
+
+    await expect(
+      api.chat.prompt({ runtimeId: "runtime-1", text: "retry is safe" }),
+    ).rejects.toMatchObject({
+      name: "INTERNAL_ERROR",
+      message: "Pi rejected the prompt",
+    });
   });
 
   it("exposes strict steer and follow-up IPC methods", async () => {

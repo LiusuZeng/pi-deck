@@ -146,6 +146,7 @@ export interface PiWorkerSpawnOptions {
   cwd: string;
   env?: NodeJS.ProcessEnv;
   requestTimeoutMs?: number;
+  notificationTimeoutMs?: number;
   stderrBufferBytes?: number;
   killGraceMs?: number;
   commandProtocol?: "command-field" | "type-field";

@@ -8,7 +8,10 @@ import {
 import type { JsonValue } from "./types.js";
 
 function makeParser(
-  options: Pick<JsonlFramingParserOptions, "maxLineBytes"> = {},
+  options: Pick<
+    JsonlFramingParserOptions,
+    "maxLineBytes" | "onFramingScan"
+  > = {},
 ): {
   parser: JsonlFramingParser;
   records: JsonValue[];
@@ -94,4 +97,51 @@ test("JSONL parser accepts the exact byte limit and rejects one byte over it", (
   assert.deepEqual(records, ["é"]);
   assert.equal(errors.length, 1);
   assert.match(errors[0].message, new RegExp(`${exactBytes} bytes`));
+});
+
+test("JSONL parser strips CRLF and preserves exact limits across chunks", () => {
+  const line = JSON.stringify({ ok: true });
+  const { parser, records, errors } = makeParser({
+    maxLineBytes: Buffer.byteLength(line, "utf8"),
+  });
+
+  parser.push(line);
+  parser.push("\r");
+  parser.push("\n");
+
+  assert.equal(errors.length, 0);
+  assert.deepEqual(records, [{ ok: true }]);
+});
+
+test("JSONL parser scans chunked get_messages-shaped records linearly", () => {
+  const record = {
+    type: "response",
+    id: "get-messages",
+    success: true,
+    data: [{ role: "assistant", content: "x".repeat(1024 * 1024) }],
+  };
+  const bytes = Buffer.from(`${JSON.stringify(record)}\n`, "utf8");
+  const parse = (
+    chunkSize: number,
+  ): { records: JsonValue[]; scans: number } => {
+    let scans = 0;
+    const { parser, records, errors } = makeParser({
+      onFramingScan: (characters) => {
+        scans += characters;
+      },
+    });
+    for (let offset = 0; offset < bytes.length; offset += chunkSize) {
+      parser.push(bytes.subarray(offset, offset + chunkSize));
+    }
+    assert.equal(errors.length, 0);
+    assert.equal(records.length, 1);
+    return { records, scans };
+  };
+
+  const unchunked = parse(bytes.length);
+  const chunked = parse(64 * 1024);
+
+  assert.equal(unchunked.scans, bytes.length);
+  assert.equal(chunked.scans, bytes.length);
+  assert.deepEqual(chunked.records, unchunked.records);
 });

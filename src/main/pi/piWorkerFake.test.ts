@@ -1,11 +1,18 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { it as test, vi } from "vitest";
 import { buildFakeRpcServer as fakePath } from "../../test/fakeRpcHarness.js";
 import { PiWorker } from "./piWorker.js";
 import { SinglePiAdapter } from "./piAdapter.js";
+import { WorkspaceUsageStore } from "../workspaces/workspaceUsage.js";
 import type { RuntimeEvent } from "./types.js";
 
 function createWorker(args: string[] = []): PiWorker {
@@ -19,12 +26,19 @@ function createWorker(args: string[] = []): PiWorker {
   });
 }
 
-function waitForWorkerEvent(
+type CancellableWorkerEventWait = {
+  promise: Promise<RuntimeEvent>;
+  cancel: () => void;
+};
+
+function createCancellableWorkerEventWait(
   worker: PiWorker,
   predicate: (event: RuntimeEvent) => boolean,
   timeoutMs = 5_000,
-): Promise<RuntimeEvent> {
-  return new Promise((resolve, reject) => {
+): CancellableWorkerEventWait {
+  let cleanedUp = false;
+  let cleanup = (): void => {};
+  const promise = new Promise<RuntimeEvent>((resolve, reject) => {
     const timer = setTimeout(() => {
       cleanup();
       reject(new Error("Timed out waiting for worker event"));
@@ -36,10 +50,60 @@ function waitForWorkerEvent(
       cleanup();
       resolve(event);
     });
-    const cleanup = (): void => {
+    cleanup = (): void => {
+      if (cleanedUp) {
+        return;
+      }
+      cleanedUp = true;
       clearTimeout(timer);
       unsubscribe();
     };
+  });
+  return { promise, cancel: () => cleanup() };
+}
+
+function waitForWorkerEvent(
+  worker: PiWorker,
+  predicate: (event: RuntimeEvent) => boolean,
+  timeoutMs = 5_000,
+): Promise<RuntimeEvent> {
+  return createCancellableWorkerEventWait(worker, predicate, timeoutMs).promise;
+}
+
+async function promptAndWaitForAgentEnd(
+  worker: PiWorker,
+  text: string,
+): Promise<RuntimeEvent> {
+  const completed = createCancellableWorkerEventWait(
+    worker,
+    (event) => event.type === "agent_end",
+  );
+  // The timeout can elapse while command acceptance is still pending. Observe
+  // that rejection now so it cannot become unhandled; awaiting the original
+  // promise below still propagates it once acceptance completes.
+  void completed.promise.catch(() => {});
+  try {
+    await worker.prompt({ text });
+    return await completed.promise;
+  } finally {
+    completed.cancel();
+  }
+}
+
+function waitForFile(file: string, timeoutMs = 5_000): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const deadline = Date.now() + timeoutMs;
+    const timer = setInterval(() => {
+      if (existsSync(file)) {
+        clearInterval(timer);
+        resolve();
+        return;
+      }
+      if (Date.now() > deadline) {
+        clearInterval(timer);
+        reject(new Error(`Timed out waiting for file: ${file}`));
+      }
+    }, 10);
   });
 }
 
@@ -164,8 +228,7 @@ test("PiWorker --fork creates an independent persisted history and identity", as
       messages.some((message) => message.content === token),
       true,
     );
-    await worker.prompt({ text: "fork-only prompt" });
-    await waitForWorkerEvent(worker, (event) => event.type === "agent_end");
+    await promptAndWaitForAgentEnd(worker, "fork-only prompt");
     assert.equal(
       readFileSync(sourceFile, "utf8").includes("fork-only prompt"),
       false,
@@ -189,8 +252,7 @@ test("PiWorker supports real-Pi type-field command protocol", async () => {
   try {
     const state = await worker.getState();
     assert.equal(state.sessionId, "fake-session-1");
-    await worker.prompt({ text: "type field prompt" });
-    await waitForWorkerEvent(worker, (event) => event.type === "agent_end");
+    await promptAndWaitForAgentEnd(worker, "type field prompt");
   } finally {
     await worker.closeSession();
   }
@@ -205,16 +267,65 @@ test("PiWorker prompt resolves on command acceptance and continues streaming eve
     }
   });
   try {
-    await worker.prompt({ text: "stream please" });
-    const endEvent = await waitForWorkerEvent(
-      worker,
-      (event) => event.type === "agent_end",
-    );
+    const endEvent = await promptAndWaitForAgentEnd(worker, "stream please");
     assert.equal((endEvent as { status?: string }).status, "completed");
     assert.ok(messageUpdates.length >= 1);
     assert.equal(messageUpdates[0].runtimeId, worker.runtimeId);
   } finally {
     unsubscribe();
+    await worker.closeSession();
+  }
+});
+
+test("PiWorker observes terminal events emitted synchronously with prompt acceptance", async () => {
+  const worker = createWorker();
+  const client = (worker as any).client;
+  const request = vi
+    .spyOn(client, "request")
+    .mockImplementation((command: string) => {
+      // Resolve command acceptance before the terminal event, as the JSONL
+      // parser does while synchronously draining both records. A post-acceptance
+      // subscription still misses the terminal event.
+      const accepted = Promise.resolve(null);
+      if (command === "prompt") {
+        client.emit("event", { type: "agent_end", status: "completed" });
+      }
+      return accepted;
+    });
+  try {
+    const event = await promptAndWaitForAgentEnd(
+      worker,
+      "synchronous completion",
+    );
+    assert.equal((event as { status?: string }).status, "completed");
+  } finally {
+    request.mockRestore();
+    await worker.closeSession();
+  }
+});
+
+test("PiWorker cancels terminal waits when prompt acceptance rejects", async () => {
+  const worker = createWorker();
+  const client = (worker as any).client;
+  const unsubscribe = vi.fn();
+  const onEvent = vi.spyOn(worker, "onEvent").mockReturnValue(unsubscribe);
+  const request = vi
+    .spyOn(client, "request")
+    .mockImplementation((command: string) => {
+      if (command === "prompt") {
+        return Promise.reject(new Error("prompt acceptance failed"));
+      }
+      return Promise.resolve(null);
+    });
+  try {
+    await assert.rejects(
+      promptAndWaitForAgentEnd(worker, "rejected prompt"),
+      /prompt acceptance failed/,
+    );
+    assert.equal(unsubscribe.mock.calls.length, 1);
+  } finally {
+    request.mockRestore();
+    onEvent.mockRestore();
     await worker.closeSession();
   }
 });
@@ -295,6 +406,75 @@ test("PiWorker writes exact extension UI response records and resumes the reques
   }
 });
 
+test("PiWorker quarantines a stalled extension response until SIGKILL proves exit", async () => {
+  const adapter = new SinglePiAdapter();
+  const worker = adapter.createWorker({
+    runtimeId: "stalled-extension-response",
+    command: process.execPath,
+    args: [
+      "-e",
+      "process.stdin.pause(); process.on('SIGTERM', () => {}); process.stdout.write('{\"type\":\"ready\"}\\n'); setInterval(() => {}, 1_000);",
+    ],
+    cwd: process.cwd(),
+    env: process.env,
+    notificationTimeoutMs: 20,
+    killGraceMs: 80,
+  });
+  await waitForWorkerEvent(worker, (event) => event.type === "ready");
+  const request = vi.spyOn((worker as any).client, "request");
+  const stdinError = waitForWorkerEvent(
+    worker,
+    (event) =>
+      event.type === "diagnostic" &&
+      /RPC stdin error:.*EPIPE/i.test(
+        (event as { message?: string }).message ?? "",
+      ),
+  );
+  const exited = waitForWorkerEvent(
+    worker,
+    (event) => event.type === "worker_exit",
+  );
+
+  await assert.rejects(
+    worker.respondToExtensionUi({
+      id: "approval-1",
+      value: "x".repeat(1024 * 1024),
+    }),
+    /delivery status is unknown/i,
+  );
+
+  // The SIGTERM-resistant child is still alive here. Its timed-out response
+  // can remain queued in stdin, so every RPC entry point must fail locally
+  // rather than enqueueing a command behind it.
+  const rejectsQuarantinedWrite = (operation: () => Promise<unknown>) =>
+    assert.rejects(operation(), /delivery status is unknown/i);
+  await rejectsQuarantinedWrite(() => worker.getState());
+  await rejectsQuarantinedWrite(() => worker.getRuntimeStatus());
+  await rejectsQuarantinedWrite(() => worker.getSessionStats());
+  await rejectsQuarantinedWrite(() => worker.getMessages());
+  await rejectsQuarantinedWrite(() => worker.prompt({ text: "new prompt" }));
+  await rejectsQuarantinedWrite(() => worker.steer({ text: "new steer" }));
+  await rejectsQuarantinedWrite(() =>
+    worker.followUp({ text: "new follow-up" }),
+  );
+  await rejectsQuarantinedWrite(() => worker.abort());
+  await rejectsQuarantinedWrite(() => worker.request("get_state"));
+  assert.equal(request.mock.calls.length, 0);
+
+  await new Promise((resolve) => setTimeout(resolve, 25));
+  assert.equal(adapter.hasRuntime(worker.runtimeId), true);
+  assert.equal(adapter.workerCount(), 1);
+  await stdinError;
+  await exited;
+  assert.equal(adapter.hasRuntime(worker.runtimeId), false);
+  assert.equal(worker.getDiagnostics().signal, "SIGKILL");
+
+  await assert.rejects(
+    worker.respondToExtensionUi({ id: "approval-1", cancelled: true }),
+    /delivery status is unknown/i,
+  );
+});
+
 test("PiWorker abort path emits a sensible aborted end state", async () => {
   const worker = createWorker(["--stream-delay-ms", "50"]);
   try {
@@ -333,6 +513,92 @@ test("PiWorker closeAndWait retains adapter capacity until delayed child exit", 
   await close;
   assert.equal(adapter.hasRuntime(worker.runtimeId), false);
   assert.equal(adapter.workerCount(), 0);
+});
+
+test("PiWorker cleans up broken stdin while retaining adapter ownership until exit", async () => {
+  const directory = mkdtempSync(path.join(tmpdir(), "pi-deck-broken-stdin-"));
+  const signalFile = path.join(directory, "sigterm-received");
+  const waitFile = path.join(directory, "allow-exit");
+  const script = `
+    const fs = require("node:fs");
+    fs.closeSync(0);
+    // Install the cleanup handler before the ready event lets the parent write.
+    process.on("SIGTERM", () => {
+      fs.writeFileSync(${JSON.stringify(signalFile)}, "received\\n");
+      const timer = setInterval(() => {
+        if (fs.existsSync(${JSON.stringify(waitFile)})) {
+          clearInterval(timer);
+          process.exit(0);
+        }
+      }, 10);
+    });
+    process.stdout.write(
+      JSON.stringify({ type: "ready", sigtermHandlerInstalled: true }) + "\\n",
+    );
+    setTimeout(() => {}, 60_000);
+  `;
+  const adapter = new SinglePiAdapter();
+  const worker = adapter.createWorker({
+    runtimeId: "broken-stdin-cleanup",
+    command: process.execPath,
+    args: ["-e", script],
+    cwd: process.cwd(),
+    env: process.env,
+    requestTimeoutMs: 1_000,
+    // The test has a 5s deadline; its controlled child must not be escalated
+    // while the parent verifies retained ownership before releasing that child.
+    killGraceMs: 10_000,
+  });
+  const exitEvents: RuntimeEvent[] = [];
+  const unsubscribe = adapter.onEvent((event) => {
+    if (event.type === "worker_exit") exitEvents.push(event);
+  });
+
+  try {
+    const ready = await waitForWorkerEvent(
+      worker,
+      (event) => event.type === "ready",
+    );
+    assert.equal(
+      (ready as { sigtermHandlerInstalled?: boolean }).sigtermHandlerInstalled,
+      true,
+    );
+    await assert.rejects(adapter.getState(worker.runtimeId), /EPIPE|stdin/i);
+    await waitForFile(signalFile);
+
+    assert.equal(adapter.hasRuntime(worker.runtimeId), true);
+    assert.equal(adapter.workerCount(), 1);
+    assert.equal(exitEvents.length, 0);
+
+    const workerExit = waitForWorkerEvent(
+      worker,
+      (event) => event.type === "worker_exit",
+    );
+    writeFileSync(waitFile, "go\n");
+    const exit = await workerExit;
+
+    assert.equal((exit as { intentional?: boolean }).intentional, false);
+    assert.equal(exitEvents.length, 1);
+    assert.equal(adapter.hasRuntime(worker.runtimeId), false);
+    assert.equal(adapter.workerCount(), 0);
+    const diagnostics = worker.getDiagnostics();
+    assert.equal(diagnostics.healthy, false);
+    assert.ok(
+      diagnostics.recentDiagnostics.some(
+        (diagnostic) =>
+          diagnostic.level === "error" &&
+          /EPIPE|stdin/i.test(diagnostic.message),
+      ),
+    );
+  } finally {
+    unsubscribe();
+    // Let the fixture finish promptly when an assertion fails before release.
+    writeFileSync(waitFile, "go\n");
+    if (adapter.hasRuntime(worker.runtimeId)) {
+      await adapter.closeSession(worker.runtimeId);
+    }
+    rmSync(directory, { recursive: true, force: true });
+  }
 });
 
 test("PiWorker escalates a SIGTERM-ignoring child and waits for SIGKILL exit", async () => {
@@ -440,13 +706,79 @@ test("PiWorker unexpected exit preserves transport diagnostics", async () => {
   assert.match(diagnostics.stderr, /deterministic stderr diagnostic/);
 });
 
+test("private planner terminal usage from fake RPC is recorded once as parallel workspace usage", async () => {
+  const root = mkdtempSync(path.join(tmpdir(), "pi-deck-planner-usage-"));
+  const sessionFile = path.join(root, "parent.jsonl");
+  writeFileSync(sessionFile, "");
+  const store = new WorkspaceUsageStore(root);
+  const workspaceId = "11111111-1111-4111-8111-111111111111";
+  const parentRuntimeId = "parent-runtime";
+  const worker = createWorker([
+    "--stream-delay-ms",
+    "1",
+    "--no-session",
+    "--include-usage",
+  ]);
+  try {
+    await promptAndWaitForAgentEnd(worker, "plan private tasks");
+    const messages = await worker.getMessages();
+    const recordPlannerUsage = (recordedAtMs: number): Promise<void> =>
+      store.recordSessionMessagesUsage({
+        workspaceId,
+        sessionFile,
+        sessionKey: `${parentRuntimeId}:private:${worker.runtimeId}`,
+        source: "parallel",
+        messages,
+        recordedAtMs,
+      });
+
+    await recordPlannerUsage(1);
+    await recordPlannerUsage(2);
+
+    assert.deepEqual(
+      await store.getWorkspaceUsage({
+        workspaceId,
+        sessionFiles: [sessionFile],
+      }),
+      {
+        inputTokens: 100,
+        outputTokens: 10,
+        cacheReadTokens: 5,
+        cacheWriteTokens: 0,
+        totalTokens: 115,
+        knownCostUsd: 0.05,
+        contributorsWithCost: 1,
+        contributorsWithoutCost: 0,
+      },
+    );
+    assert.equal(
+      JSON.stringify(
+        JSON.parse(readFileSync(store.storeFile, "utf8")),
+      ).includes("plan private tasks"),
+      false,
+    );
+    const reloaded = new WorkspaceUsageStore(root);
+    assert.equal(
+      (
+        await reloaded.getWorkspaceUsage({
+          workspaceId,
+          sessionFiles: [sessionFile],
+        })
+      ).totalTokens,
+      115,
+    );
+  } finally {
+    await worker.closeSession();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("session stats uses get_session_stats without transferring messages", async () => {
   const worker = createWorker(["--stream-delay-ms", "1", "--include-usage"]);
   const getMessages = vi.spyOn(worker, "getMessages");
   const request = vi.spyOn((worker as any).client, "request");
   try {
-    await worker.prompt({ text: "usage please" });
-    await waitForWorkerEvent(worker, (event) => event.type === "agent_end");
+    await promptAndWaitForAgentEnd(worker, "usage please");
     const stats = await worker.getSessionStats();
     assert.deepEqual((stats as any).tokens, {
       input: 100,

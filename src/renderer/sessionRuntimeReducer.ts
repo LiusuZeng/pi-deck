@@ -1,5 +1,6 @@
 import type { AttachmentDraft, ChatRuntimeEvent } from "../shared/types.js";
 import {
+  markInterventionDeliveryUnconfirmed,
   matchDurableInterventionMessages,
   reconcileInterventionQueueEvidence,
   type DurableUserMessageEvidence,
@@ -112,6 +113,8 @@ export type TimelineItem =
       content: string;
       createdAt: string;
       streaming?: boolean;
+      /** Durable Pi message identity when this row came from get_messages. */
+      sourceMessageId?: string;
     }
   | {
       id: string;
@@ -392,7 +395,12 @@ export function reduceRuntimeEventUnprioritized(
         subtitle: `Working · ${backendLabel(session)} stream`,
         workingStartedAtMs: session.workingStartedAtMs ?? Date.now(),
         lastRuntimeEventLabel: "Pi agent started",
-        retryPrompt: undefined,
+        // A sending state owns an optimistic retry source for this same prompt.
+        // Keep it through agent_start so a terminal provider error can expose
+        // Retry prompt; pending-recovery quarantine still blocks that retry
+        // when its acknowledgement is later classified as uncertain.
+        retryPrompt:
+          session.status === "sending" ? session.retryPrompt : undefined,
         // Starting/replacing a worker and get_state only prove transport
         // availability. Keep auth repair pending until a model turn ends.
         providerErrorObserved: false,
@@ -593,6 +601,23 @@ export function reduceRuntimeEventUnprioritized(
       return session.runtimeBacked
         ? clearExtensionUiRequest(session, getString(event, "requestId"))
         : session;
+    case "extension_ui_response_delivery_unknown": {
+      if (!session.runtimeBacked) return session;
+      // The worker is quarantined: a timed-out response can still be queued
+      // in stdin, so no remaining dialog is safe to answer or retry.
+      const cleared = clearPendingExtensionUiRequests(session);
+      return appendRuntimeErrorDiagnostic(
+        {
+          ...cleared,
+          status: "error",
+          baseState: "error",
+          overlays: { ...cleared.overlays, needsUserInput: false },
+          subtitle: "Error · extension response delivery is unknown",
+        },
+        getString(event, "message") ??
+          "Pi Deck is closing this session because the extension response may have been delivered late.",
+      );
+    }
     case "extension_ui_response_failed": {
       if (!session.runtimeBacked) {
         return session;
@@ -669,8 +694,20 @@ export function reduceRuntimeEventUnprioritized(
         timelineWithDurableInterventions,
         aborted,
       );
+      // A terminal abort/error can clear Pi's in-memory queues. Without a
+      // durable user turn, neither outcome proves delivery; leave a visible
+      // receipt that a later snapshot can still reconcile.
+      const deliveryTimeline =
+        aborted || endedWithError
+          ? markInterventionsDeliveryUnconfirmed(
+              finalizedTimeline,
+              aborted
+                ? "Pi stopped before delivery could be confirmed. Reopen the saved session to reconcile its transcript."
+                : "Pi ended with an error before delivery could be confirmed. Reopen the saved session to reconcile its transcript.",
+            )
+          : finalizedTimeline;
       const completedTimeline = removeEmptyAssistantMessages(
-        finalizedTimeline.map((item) =>
+        deliveryTimeline.map((item) =>
           item.kind === "assistant" && item.streaming === true
             ? { ...item, streaming: false }
             : item,
@@ -861,7 +898,18 @@ export function reduceRuntimeEventUnprioritized(
       // resumable row rather than presenting a backend failure.
       const detachedSession = clearPendingExtensionUiRequests({
         ...session,
-        timeline: finalizeUnresolvedSubagentActivities(session.timeline, true),
+        // Once the worker is gone, its last queue update is no longer live
+        // evidence. Do not call the instruction failed: Pi may have accepted
+        // it before the transport died, and a resumed transcript can still
+        // prove consumption.
+        timeline: markInterventionsDeliveryUnconfirmed(
+          finalizeUnresolvedSubagentActivities(session.timeline, true),
+        ),
+        overlays: {
+          ...session.overlays,
+          piQueuedSteeringCount: 0,
+          piQueuedFollowUpCount: 0,
+        },
       });
       if (intentional && session.sessionFile !== undefined) {
         const lifecycle =
@@ -1892,6 +1940,17 @@ function reduceMessageUpdate(
 function removeEmptyAssistantMessages(items: TimelineItem[]): TimelineItem[] {
   return items.filter(
     (item) => item.kind !== "assistant" || item.content.trim().length > 0,
+  );
+}
+
+function markInterventionsDeliveryUnconfirmed(
+  timeline: readonly TimelineItem[],
+  message = "Pi disconnected before delivery could be confirmed. Reopen the saved session to reconcile its transcript.",
+): TimelineItem[] {
+  return timeline.map((item) =>
+    item.kind === "intervention"
+      ? markInterventionDeliveryUnconfirmed(item, message)
+      : item,
   );
 }
 

@@ -44,6 +44,8 @@ Useful fixture flags:
 - `--production-shaped` — keeps the deterministic fake transport but uses realistic model names, assistant copy, and extension-request wording for documentation captures. `npm run docs:capture` combines this fixture with Electron's real-mode UI; it does not invoke an actual Pi executable or contact a provider. Tests retain the explicit fake labels by default.
 - `--structured-messages` — returns mixed provider-native content arrays and message-level timestamp fallbacks while retaining unknown parts. This deterministic fixture is based on Pi's documented/current message shapes; it is not an authenticated provider capture.
 - `--intervention-snapshot-race` — advances steering through explicit `get_messages` barriers: queued snapshot, queue removal, stale pre-persistence snapshot, persisted ID-less user turn, then production-shaped terminal events. This fixture validates post-terminal transcript reconciliation without timing sleeps.
+- `--exit-after-intervention-receipt` — acknowledges and reports a queued steer/follow-up, then exits before any durable user-turn evidence. It verifies that a lost Pi connection is shown as delivery-unconfirmed rather than failed or consumed.
+- `--persist-intervention-before-exit` — used with the preceding fixture to persist the intervention user turn before exit, for deterministic saved-session reconciliation coverage.
 - `--prompt-scenario <name>` — emits additional deterministic prompt-side events. Supported names:
   - `basic` — default `agent_start`, streaming `message_update`, `agent_end`.
   - `tool` — adds `tool_execution_start/update/end`.

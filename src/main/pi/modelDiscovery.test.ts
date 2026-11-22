@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  discoverPiRuntimeModelResponses,
   mergePiRuntimeDiscoveryWithModelFallback,
   parsePiModelList,
   parsePiRuntimeModelDiscovery,
@@ -260,6 +261,77 @@ local         text-model           32K      8K       no        no
 
     expect(result.models).toHaveLength(1);
     expect(result).not.toHaveProperty("thinkingLevel");
+  });
+
+  it("retains active-runtime defaults when a sibling RPC fails", async () => {
+    const inventoryFailure = new Error("inventory unavailable");
+    const outcome = discoverPiRuntimeModelResponses(async (command) => {
+      if (command === "get_state") {
+        return {
+          model: "active-model",
+          provider: "runtime",
+          thinkingLevel: "medium",
+        };
+      }
+      if (command === "get_available_models") throw inventoryFailure;
+      return { levels: ["off", "medium", "high"] };
+    }).catch((error: unknown) => error);
+
+    await expect(outcome).resolves.toMatchObject({
+      failedCommands: ["get_available_models"],
+      partialResult: {
+        models: [],
+        activeModel: { id: "active-model", provider: "runtime" },
+        thinkingLevel: "medium",
+        thinkingLevels: ["off", "medium", "high"],
+      },
+      cause: inventoryFailure,
+    });
+  });
+
+  it("supplements an empty successful RPC inventory with CLI models", async () => {
+    const runtimeFailure = new PiRuntimeModelDiscoveryError(
+      [],
+      {
+        models: [],
+        activeModel: { id: "runtime-model", provider: "runtime" },
+        thinkingLevel: "medium",
+        thinkingLevels: ["off", "medium"],
+      },
+      new Error("Pi runtime returned no usable model inventory."),
+    );
+    let fallbackCalls = 0;
+
+    await expect(
+      recoverPiRuntimeModelDiscovery(runtimeFailure, async () => {
+        fallbackCalls += 1;
+        return [
+          {
+            id: "runtime-model",
+            name: "Runtime model",
+            provider: "runtime",
+            reasoning: true,
+          },
+        ];
+      }),
+    ).resolves.toMatchObject({
+      models: [{ id: "runtime-model", provider: "runtime" }],
+      activeModel: { id: "runtime-model", provider: "runtime" },
+      thinkingLevel: "medium",
+    });
+    expect(fallbackCalls).toBe(1);
+  });
+
+  it("reports total unusable discovery when a successful CLI fallback is empty", async () => {
+    const runtimeFailure = new PiRuntimeModelDiscoveryError(
+      [],
+      { models: [], thinkingLevels: [] },
+      new Error("Pi runtime returned no usable model inventory."),
+    );
+
+    await expect(
+      recoverPiRuntimeModelDiscovery(runtimeFailure, async () => []),
+    ).rejects.toBeInstanceOf(PiModelDiscoveryUnavailableError);
   });
 
   it("uses valid RPC inventory without invoking CLI when only thinking-level discovery fails", async () => {

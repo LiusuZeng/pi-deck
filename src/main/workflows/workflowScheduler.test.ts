@@ -17,6 +17,7 @@ import {
   type WorkflowSessionSnapshot,
 } from "./workflowScheduler.js";
 import { WorkspaceRuntimeLifecycleConflictError } from "../workspaceRuntimeLifecycleGate.js";
+import { WorkflowRuntimeOwnershipRegistry } from "../workflowRuntimeOwnership.js";
 import type { AgentWorkflowDefinition } from "../../shared/agentWorkflowSchemas.js";
 import type {
   WorkflowRun,
@@ -226,6 +227,51 @@ const lifecycleDefinition: AgentWorkflowDefinition = {
     {
       id: "00000000-0000-4000-8000-000000000203",
       from: "00000000-0000-4000-8000-000000000202",
+      to: { end: "completed" },
+    },
+  ],
+};
+
+function deferred() {
+  let resolve!: () => void;
+  const promise = new Promise<void>((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
+}
+
+const stopTransitionDefinition: AgentWorkflowDefinition = {
+  format: "pi-deck.agent-workflow",
+  schemaVersion: 2,
+  id: "00000000-0000-4000-8000-000000000301",
+  revision: 1,
+  name: "Stop transition",
+  inputs: [],
+  entryNodeId: "00000000-0000-4000-8000-000000000302",
+  nodes: [
+    {
+      id: "00000000-0000-4000-8000-000000000302",
+      name: "First",
+      role: "worker",
+      config: { instructions: "first" },
+    },
+    {
+      id: "00000000-0000-4000-8000-000000000303",
+      name: "Second",
+      role: "worker",
+      config: { instructions: "second" },
+      execution: { model: "inherit", thinking: "inherit" },
+    },
+  ],
+  relationships: [
+    {
+      id: "00000000-0000-4000-8000-000000000304",
+      from: "00000000-0000-4000-8000-000000000302",
+      to: { nodeId: "00000000-0000-4000-8000-000000000303" },
+    },
+    {
+      id: "00000000-0000-4000-8000-000000000305",
+      from: "00000000-0000-4000-8000-000000000303",
       to: { end: "completed" },
     },
   ],
@@ -773,6 +819,294 @@ describe("WorkflowScheduler", () => {
     expect(
       latest.stepRuns.find((step) => step.templateStepId === "yes")?.status,
     ).toBe("waiting");
+  });
+});
+
+describe("WorkflowOccurrenceScheduler Stop during automatic launch", () => {
+  it("closes a known continuation during configuration and does not prompt it", async () => {
+    let persisted = createWorkflowRoleRun(
+      stopTransitionDefinition,
+      "workspace",
+      {},
+      1,
+    );
+    let created = 0;
+    const prompts: Array<{ runtimeId: string; text: string }> = [];
+    const closed: string[] = [];
+    const secondConfiguration = deferred();
+    const releaseSecondConfiguration = deferred();
+    const secondClosed = deferred();
+    const releaseSecondClose = deferred();
+    const ownership = new WorkflowRuntimeOwnershipRegistry();
+    let secondReleases = 0;
+    const scheduler = new WorkflowOccurrenceScheduler({
+      createSession: async (_workspaceId, request) => {
+        const runtimeId = `runtime-${++created}`;
+        const claim = ownership.claim(runtimeId, {
+          scheduler: "occurrence",
+          runId: request!.runId,
+          itemId: request!.itemId,
+          itemKind: request!.itemKind,
+          workspaceId: "workspace",
+        });
+        return {
+          runtimeId,
+          state: {
+            sessionId: `session-${created}`,
+            sessionFile: `/tmp/${runtimeId}.jsonl`,
+          },
+          messages: [],
+          workflowOwnershipClaim:
+            runtimeId === "runtime-2"
+              ? {
+                  ...claim,
+                  release: () => {
+                    secondReleases += 1;
+                    claim.release();
+                  },
+                }
+              : claim,
+        };
+      },
+      configureSession: async (runtimeId) => {
+        if (runtimeId === "runtime-2") {
+          secondConfiguration.resolve();
+          await releaseSecondConfiguration.promise;
+        }
+      },
+      prompt: async (runtimeId, text) => {
+        prompts.push({ runtimeId, text });
+      },
+      getSnapshot: async (runtimeId) => ({
+        runtimeId,
+        state: {},
+        messages: [{ role: "assistant", content: `answer from ${runtimeId}` }],
+      }),
+      closeSession: async (runtimeId) => {
+        closed.push(runtimeId);
+        if (runtimeId === "runtime-2") {
+          expect(ownership.isOwned(runtimeId)).toBe(true);
+          secondClosed.resolve();
+          await releaseSecondClose.promise;
+        }
+      },
+      getRun: async () => structuredClone(persisted),
+      persist: async (run) => {
+        expect(run.revision).toBe(persisted.revision);
+        persisted = { ...run, revision: persisted.revision + 1 };
+        return structuredClone(persisted);
+      },
+      emit: () => undefined,
+      now: () => 10,
+    });
+
+    await scheduler.schedule(persisted);
+    const advance = scheduler.handleRuntimeEvent({
+      type: "agent_end",
+      runtimeId: "runtime-1",
+      status: "completed",
+    });
+    await secondConfiguration.promise;
+    const stop = scheduler.stop(persisted.id, persisted.revision);
+
+    await secondClosed.promise;
+    expect(prompts.map((item) => item.runtimeId)).toEqual(["runtime-1"]);
+    expect(ownership.get("runtime-2")?.phase).toBe("closing");
+    expect(ownership.isOwned("runtime-2")).toBe(true);
+    expect(secondReleases).toBe(0);
+
+    releaseSecondConfiguration.resolve();
+    releaseSecondClose.resolve();
+    await Promise.all([advance, stop]);
+
+    expect(prompts.map((item) => item.runtimeId)).toEqual(["runtime-1"]);
+    expect(closed).toEqual(["runtime-1", "runtime-2"]);
+    expect(ownership.isOwned("runtime-2")).toBe(false);
+    expect(secondReleases).toBe(1);
+    expect(persisted).toMatchObject({ status: "stopped" });
+    expect(persisted.occurrences).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          status: "completed",
+          output: "answer from runtime-1",
+        }),
+        expect.objectContaining({ status: "cancelled" }),
+      ]),
+    );
+  });
+
+  it("retires a session that finishes creation after Stop without prompting it", async () => {
+    let persisted = createWorkflowRoleRun(
+      stopTransitionDefinition,
+      "workspace",
+      {},
+      1,
+    );
+    let created = 0;
+    const prompts: string[] = [];
+    const closed: string[] = [];
+    const secondCreation = deferred();
+    const releaseSecondCreation = deferred();
+    const secondCloseStarted = deferred();
+    const releaseSecondClose = deferred();
+    const ownership = new WorkflowRuntimeOwnershipRegistry();
+    let secondReleases = 0;
+    const scheduler = new WorkflowOccurrenceScheduler({
+      createSession: async (_workspaceId, request) => {
+        const runtimeId = `runtime-${++created}`;
+        if (runtimeId === "runtime-2") {
+          secondCreation.resolve();
+          await releaseSecondCreation.promise;
+        }
+        const claim = ownership.claim(runtimeId, {
+          scheduler: "occurrence",
+          runId: request!.runId,
+          itemId: request!.itemId,
+          itemKind: request!.itemKind,
+          workspaceId: "workspace",
+        });
+        return {
+          runtimeId,
+          state: {
+            sessionId: `session-${created}`,
+            sessionFile: `/tmp/${runtimeId}.jsonl`,
+          },
+          messages: [],
+          workflowOwnershipClaim:
+            runtimeId === "runtime-2"
+              ? {
+                  ...claim,
+                  release: () => {
+                    secondReleases += 1;
+                    claim.release();
+                  },
+                }
+              : claim,
+        };
+      },
+      configureSession: async () => undefined,
+      prompt: async (runtimeId) => {
+        prompts.push(runtimeId);
+      },
+      getSnapshot: async (runtimeId) => ({
+        runtimeId,
+        state: {},
+        messages: [{ role: "assistant", content: `answer from ${runtimeId}` }],
+      }),
+      closeSession: async (runtimeId) => {
+        closed.push(runtimeId);
+        if (runtimeId === "runtime-2") {
+          expect(ownership.isOwned(runtimeId)).toBe(true);
+          secondCloseStarted.resolve();
+          await releaseSecondClose.promise;
+        }
+      },
+      getRun: async () => structuredClone(persisted),
+      persist: async (run) => {
+        expect(run.revision).toBe(persisted.revision);
+        persisted = { ...run, revision: persisted.revision + 1 };
+        return structuredClone(persisted);
+      },
+      emit: () => undefined,
+      now: () => 10,
+    });
+
+    await scheduler.schedule(persisted);
+    const advance = scheduler.handleRuntimeEvent({
+      type: "agent_end",
+      runtimeId: "runtime-1",
+      status: "completed",
+    });
+    await secondCreation.promise;
+    const stop = scheduler.stop(persisted.id, persisted.revision);
+    releaseSecondCreation.resolve();
+    await secondCloseStarted.promise;
+
+    expect(ownership.get("runtime-2")?.phase).toBe("closing");
+    expect(ownership.isOwned("runtime-2")).toBe(true);
+    expect(secondReleases).toBe(0);
+
+    releaseSecondClose.resolve();
+    await Promise.all([advance, stop]);
+
+    expect(prompts).toEqual(["runtime-1"]);
+    expect(closed).toEqual(["runtime-1", "runtime-2"]);
+    expect(ownership.isOwned("runtime-2")).toBe(false);
+    expect(secondReleases).toBe(1);
+    expect(persisted).toMatchObject({ status: "stopped" });
+    expect(persisted.occurrences).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          status: "completed",
+          output: "answer from runtime-1",
+        }),
+        expect.objectContaining({ status: "cancelled" }),
+      ]),
+    );
+  });
+
+  it("keeps already submitted prompt work cancellable without treating close as a launch failure", async () => {
+    let persisted = createWorkflowRoleRun(
+      lifecycleDefinition,
+      "workspace",
+      {},
+      1,
+    );
+    let created = 0;
+    const prompts: string[] = [];
+    const closed: string[] = [];
+    const promptEntered = deferred();
+    const releasePrompt = deferred();
+    const runtimeClosed = deferred();
+    const scheduler = new WorkflowOccurrenceScheduler({
+      createSession: async () => {
+        const runtimeId = `runtime-${++created}`;
+        return {
+          runtimeId,
+          state: {
+            sessionId: `session-${created}`,
+            sessionFile: `/tmp/${runtimeId}.jsonl`,
+          },
+          messages: [],
+        };
+      },
+      prompt: async (runtimeId) => {
+        prompts.push(runtimeId);
+        promptEntered.resolve();
+        await releasePrompt.promise;
+      },
+      getSnapshot: async (runtimeId) => ({
+        runtimeId,
+        state: {},
+        messages: [{ role: "assistant", content: "late answer" }],
+      }),
+      closeSession: async (runtimeId) => {
+        closed.push(runtimeId);
+        runtimeClosed.resolve();
+      },
+      getRun: async () => structuredClone(persisted),
+      persist: async (run) => {
+        expect(run.revision).toBe(persisted.revision);
+        persisted = { ...run, revision: persisted.revision + 1 };
+        return structuredClone(persisted);
+      },
+      emit: () => undefined,
+      now: () => 10,
+    });
+
+    const scheduled = scheduler.schedule(persisted);
+    await promptEntered.promise;
+    const stop = scheduler.stop(persisted.id, persisted.revision);
+
+    await runtimeClosed.promise;
+    expect(prompts).toEqual(["runtime-1"]);
+
+    releasePrompt.resolve();
+    await Promise.all([scheduled, stop]);
+
+    expect(closed).toEqual(["runtime-1"]);
+    expect(persisted).toMatchObject({ status: "stopped" });
+    expect(persisted.occurrences[0]).toMatchObject({ status: "cancelled" });
   });
 });
 

@@ -131,6 +131,82 @@ describe("ExtensionUiRequestRegistry", () => {
     expect(value.snapshot("runtime-1")).toMatchObject([{ title: "New" }]);
   });
 
+  it("discards an unknown-delivery claim without clearing a newer same-id request", () => {
+    const { value } = registry();
+    value.register("runtime-1", {
+      id: "approval-1",
+      method: "confirm",
+      title: "Old request without a dialog timeout",
+    });
+    const oldClaim = value.claim("runtime-1", "approval-1")!;
+
+    value.register("runtime-1", {
+      id: "approval-1",
+      method: "confirm",
+      title: "New request",
+    });
+
+    expect(value.complete(oldClaim)).toBe(false);
+    expect(value.snapshot("runtime-1")).toMatchObject([
+      { title: "New request" },
+    ]);
+    expect(value.pendingCount).toBe(1);
+  });
+
+  it("quarantines every dialog until confirmed worker exit", () => {
+    const { value } = registry();
+    value.register("runtime-1", {
+      id: "approval-1",
+      method: "confirm",
+      title: "First pending dialog",
+    });
+    value.register("runtime-1", {
+      id: "approval-2",
+      method: "confirm",
+      title: "Second pending dialog",
+      timeout: 100,
+    });
+    const claimed = value.claim("runtime-1", "approval-1")!;
+
+    value.quarantineRuntime("runtime-1");
+
+    expect(value.isRuntimeQuarantined("runtime-1")).toBe(true);
+    expect(value.pendingCount).toBe(0);
+    expect(value.snapshot("runtime-1")).toEqual([]);
+    expect(value.complete(claimed)).toBe(false);
+    expect(
+      value.register("runtime-1", {
+        id: "approval-3",
+        method: "confirm",
+        title: "Late dialog from quarantined worker",
+      }),
+    ).toBe(false);
+    expect(value.snapshot("runtime-1")).toEqual([]);
+
+    // A failed reset/close attempt is not evidence that the queued response
+    // cannot still arrive, so it must leave this runtime quarantined.
+    expect(value.isRuntimeQuarantined("runtime-1")).toBe(true);
+    expect(
+      value.register("runtime-1", {
+        id: "approval-after-failed-close",
+        method: "confirm",
+        title: "Must remain blocked until actual exit",
+      }),
+    ).toBe(false);
+
+    // Main releases this only after closeSession confirms PiWorker exit.
+    value.releaseRuntime("runtime-1");
+    expect(value.isRuntimeQuarantined("runtime-1")).toBe(false);
+    expect(
+      value.register("runtime-1", {
+        id: "approval-4",
+        method: "confirm",
+        title: "Dialog from a replacement worker",
+      }),
+    ).toBe(true);
+    expect(value.snapshot("runtime-1")).toMatchObject([{ id: "approval-4" }]);
+  });
+
   it("invalidates a claim when its runtime is cleared with no pending record", () => {
     const { value } = registry();
     value.register("runtime-1", {

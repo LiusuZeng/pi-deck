@@ -167,35 +167,67 @@ export async function runMinimalRpcSmokeTest(
 }
 
 function closeClient(client: JsonlRpcClient): Promise<void> {
+  const child: ChildProcess = client.child;
+  if (isChildTerminal(child)) {
+    return Promise.resolve();
+  }
+
   return new Promise((resolve) => {
-    const child: ChildProcess = client.child;
-    if (child.exitCode !== null || child.signalCode !== null || child.killed) {
+    let settled = false;
+    let killTimer: ReturnType<typeof setTimeout> | undefined;
+    const finish = (): void => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      if (killTimer) {
+        clearTimeout(killTimer);
+      }
+      child.off("exit", finish);
+      child.off("close", finish);
       resolve();
+    };
+
+    // A spawn error before a PID is assigned is handled by isChildTerminal()
+    // above. Once we own a PID, only exit/close is confirmation that it is
+    // gone; an error can report failed signal delivery while it remains alive.
+    child.once("exit", finish);
+    child.once("close", finish);
+
+    try {
+      client.close("SIGTERM");
+    } catch {
+      // Keep waiting for the child lifecycle event. Failed signal delivery is
+      // not proof that the owned subprocess has terminated.
+    }
+
+    if (isChildTerminal(child)) {
+      finish();
       return;
     }
 
-    let settled = false;
-    const finish = (): void => {
-      if (!settled) {
-        settled = true;
-        clearTimeout(killTimer);
-        resolve();
+    killTimer = setTimeout(() => {
+      if (!isChildTerminal(child)) {
+        try {
+          child.kill("SIGKILL");
+        } catch {
+          // Keep waiting. A failed SIGKILL delivery still is not terminal
+          // confirmation, while ESRCH will be followed by an exit/close/error.
+        }
       }
-    };
-    const killTimer = setTimeout(() => {
-      if (
-        child.exitCode === null &&
-        child.signalCode === null &&
-        !child.killed
-      ) {
-        child.kill("SIGKILL");
+      if (isChildTerminal(child)) {
+        finish();
       }
-      finish();
     }, 1_000);
-
-    child.once("exit", finish);
-    client.close("SIGTERM");
   });
+}
+
+function isChildTerminal(child: ChildProcess): boolean {
+  return (
+    child.pid === undefined ||
+    child.exitCode !== null ||
+    child.signalCode !== null
+  );
 }
 
 async function listFilesSafe(root: string): Promise<string[]> {

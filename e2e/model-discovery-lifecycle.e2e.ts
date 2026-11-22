@@ -24,6 +24,7 @@ interface HarnessOptions {
   discoveryMode?: DiscoveryMode;
   holdListModels?: boolean;
   failListModels?: boolean;
+  failActiveModelInventory?: boolean;
   ignoreDiscoverySigterm?: boolean;
 }
 
@@ -210,6 +211,9 @@ if (argv.includes("--mode") && argv.includes("rpc") && argv.includes("--no-sessi
   return;
 }
 process.argv.push("--extra-model");
+if (process.env.MODEL_LIFECYCLE_FAIL_ACTIVE_MODEL_INVENTORY === "1") {
+  process.argv.push("--fail-command", "get_available_models");
+}
 require(${JSON.stringify(path.join(repoRoot, "dist/main/pi/fakeRpc/fakeRpcServer.js"))});
 `,
     { mode: 0o755 },
@@ -222,7 +226,7 @@ require(${JSON.stringify(path.join(repoRoot, "dist/main/pi/fakeRpc/fakeRpcServer
     env: {
       ...process.env,
       PI_DECK_E2E_TEST: "1",
-      PI_DECK_E2E_HIDE_WINDOWS: "1",
+      PI_DECK_E2E_HIDE_WINDOWS: process.env.PI_DECK_E2E_HIDE_WINDOWS ?? "1",
       PI_DECK_BACKEND: "real",
       PI_DECK_PI_BINARY: fakePi,
       PI_DECK_PROJECT_CWD: projectCwd,
@@ -233,6 +237,8 @@ require(${JSON.stringify(path.join(repoRoot, "dist/main/pi/fakeRpc/fakeRpcServer
       MODEL_LIFECYCLE_DISCOVERY_MODE: options.discoveryMode ?? "success",
       MODEL_LIFECYCLE_HOLD_LIST: options.holdListModels ? "1" : "0",
       MODEL_LIFECYCLE_FAIL_LIST: options.failListModels ? "1" : "0",
+      MODEL_LIFECYCLE_FAIL_ACTIVE_MODEL_INVENTORY:
+        options.failActiveModelInventory ? "1" : "0",
       MODEL_LIFECYCLE_IGNORE_DISCOVERY_SIGTERM: options.ignoreDiscoverySigterm
         ? "1"
         : "0",
@@ -251,11 +257,13 @@ require(${JSON.stringify(path.join(repoRoot, "dist/main/pi/fakeRpc/fakeRpcServer
     page.locator('.workspace[data-load-state="ready"]'),
   ).toBeVisible();
 
-  expect(
-    await app.evaluate(({ BrowserWindow }) =>
-      BrowserWindow.getAllWindows().every((window) => !window.isVisible()),
-    ),
-  ).toBe(true);
+  if ((process.env.PI_DECK_E2E_HIDE_WINDOWS ?? "1") === "1") {
+    expect(
+      await app.evaluate(({ BrowserWindow }) =>
+        BrowserWindow.getAllWindows().every((window) => !window.isVisible()),
+      ),
+    ).toBe(true);
+  }
 
   return {
     app,
@@ -712,6 +720,47 @@ test("partial RPC discovery keeps state defaults while CLI supplies failed inven
     expect(pidCount(harness.rpcPidFile)).toBe(2);
     expect(pidCount(harness.listPidFile)).toBe(2);
     expectAllExited(harness.rpcPidFile);
+    expectAllExited(harness.listPidFile);
+  } finally {
+    await closeHarness(harness);
+  }
+});
+
+test("active runtime partial discovery preserves defaults while CLI supplies inventory", async () => {
+  const harness = await launchHarness({
+    name: "active-runtime-partial-fallback",
+    failActiveModelInventory: true,
+  });
+  try {
+    const workspaceId = await activeWorkspaceId(harness.page);
+    const result = await harness.page.evaluate(async (id) => {
+      const snapshot = await window.piDeck.chat.reset();
+      return window.piDeck.chat.listModels({
+        runtimeId: snapshot.runtimeId,
+        workspaceId: id,
+      });
+    }, workspaceId);
+
+    expect(result.models).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ id: "runtime-one", provider: "runtime" }),
+      ]),
+    );
+    expect(result.activeModel).toMatchObject({
+      id: "fake-model",
+      provider: "fake-provider",
+    });
+    expect(result.thinkingLevel).toBe("medium");
+    expect(result.thinkingLevels).toEqual([
+      "off",
+      "minimal",
+      "low",
+      "medium",
+      "high",
+      "xhigh",
+      "max",
+    ]);
+    expect(pidCount(harness.listPidFile)).toBe(1);
     expectAllExited(harness.listPidFile);
   } finally {
     await closeHarness(harness);

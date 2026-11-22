@@ -41,6 +41,7 @@ import type {
   MultitaskStateEvent,
   MultitaskTaskSummary,
   ParallelWorkerSettings,
+  SavedAnswerDetail,
 } from "../shared/types.js";
 import type {
   CanonicalNodeOccurrence,
@@ -103,6 +104,7 @@ import {
 import {
   loadAttachedSessionRecovery,
   projectAttachedSessionRecovery,
+  reconcileRecoveredInterventionTimeline,
 } from "./attachedSessionRecovery.js";
 import {
   createDraftAfterWorkspaceActivation,
@@ -218,6 +220,7 @@ import {
   ActivityInbox,
   type ActivityInboxFilter,
 } from "./components/ActivityInbox.js";
+import { SavedAnswers } from "./components/SavedAnswers.js";
 import {
   isNavigationGenerationCurrent,
   nextNavigationGeneration,
@@ -231,6 +234,7 @@ import {
   backToWorkView,
   isAllWorkPrimaryView,
   replaceSessionRouteId,
+  savedAnswersView,
   sessionView,
   workflowView as workflowPrimaryView,
   workOriginForPrimaryView,
@@ -251,6 +255,70 @@ import type {
   SubagentActivity,
   SubagentActivityChild,
 } from "./subagentActivity.js";
+
+interface SaveAnswerDialogState {
+  requestId: string;
+  runtimeId: string;
+  assistantText: string;
+  assistantMessageId?: string;
+  title: string;
+  target?: { outputId: string; expectedRevisionId: string };
+  returnFocus: HTMLButtonElement;
+}
+
+interface OutputRevisionTarget {
+  outputId: string;
+  expectedRevisionId: string;
+  title: string;
+  displayNumber: number;
+}
+
+const OUTPUT_REVISION_TARGETS_KEY = "pi-deck.output-revision-targets.v1";
+
+function loadOutputRevisionTargets(): Record<string, OutputRevisionTarget> {
+  try {
+    const parsed = JSON.parse(
+      window.localStorage.getItem(OUTPUT_REVISION_TARGETS_KEY) ?? "{}",
+    ) as unknown;
+    if (
+      parsed === null ||
+      typeof parsed !== "object" ||
+      Array.isArray(parsed)
+    ) {
+      return {};
+    }
+    const result: Record<string, OutputRevisionTarget> = {};
+    for (const [runtimeId, candidate] of Object.entries(parsed)) {
+      if (
+        candidate === null ||
+        typeof candidate !== "object" ||
+        Array.isArray(candidate)
+      )
+        continue;
+      const value = candidate as Record<string, unknown>;
+      if (
+        typeof value.outputId === "string" &&
+        typeof value.expectedRevisionId === "string" &&
+        typeof value.title === "string" &&
+        value.title.length > 0 &&
+        value.title.length <= 240 &&
+        typeof value.displayNumber === "number" &&
+        Number.isInteger(value.displayNumber) &&
+        value.displayNumber > 0
+      ) {
+        result[runtimeId] = {
+          outputId: value.outputId,
+          expectedRevisionId: value.expectedRevisionId,
+          title: value.title,
+          displayNumber: value.displayNumber,
+        };
+      }
+    }
+    return result;
+  } catch {
+    return {};
+  }
+}
 
 const AgentWorkflowBuilder = lazy(() =>
   import("./components/workflows/AgentWorkflowBuilder.js").then((module) => ({
@@ -1308,6 +1376,13 @@ export function App(): ReactElement {
   const [pendingComposerRecoveries, setPendingComposerRecoveries] =
     useState<PendingComposerRecoveriesBySession>({});
   const [composerError, setComposerError] = useState<string | null>(null);
+  const [saveAnswerDialog, setSaveAnswerDialog] =
+    useState<SaveAnswerDialogState>();
+  const [saveAnswerPending, setSaveAnswerPending] = useState(false);
+  const [saveAnswerError, setSaveAnswerError] = useState<string>();
+  const [outputRevisionTargets, setOutputRevisionTargets] = useState<
+    Record<string, OutputRevisionTarget>
+  >(loadOutputRevisionTargets);
   const [multitask, setMultitask] = useState<
     Record<string, MultitaskStateEvent>
   >({});
@@ -1811,6 +1886,21 @@ export function App(): ReactElement {
     );
   }
 
+  function showSavedAnswers(
+    workspaceId: string,
+    selectedOutputId?: string,
+  ): void {
+    const generation = beginNavigation();
+    if (!isNavigationCurrent(generation)) return;
+    setPrimaryView((current) =>
+      savedAnswersView(
+        workspaceId,
+        workOriginForPrimaryView(current, currentWorkspaceRef.current.id),
+        selectedOutputId,
+      ),
+    );
+  }
+
   function showSessionDetail(
     sessionId: string,
     origin?: WorkOrigin,
@@ -2086,6 +2176,71 @@ export function App(): ReactElement {
     return request;
   }
 
+  function requestSaveAnswer(
+    item: Extract<TimelineItem, { kind: "assistant" }>,
+    returnFocus: HTMLButtonElement,
+  ): void {
+    if (!selectedSession.runtimeBacked || item.streaming === true) return;
+    const target = outputRevisionTargets[selectedSession.id];
+    setSaveAnswerError(undefined);
+    setSaveAnswerDialog({
+      requestId: window.crypto.randomUUID(),
+      runtimeId: selectedSession.id,
+      assistantText: item.content,
+      ...(item.sourceMessageId === undefined
+        ? {}
+        : { assistantMessageId: item.sourceMessageId }),
+      title: (target?.title ?? `${selectedSession.title} answer`).slice(0, 240),
+      ...(target === undefined
+        ? {}
+        : {
+            target: {
+              outputId: target.outputId,
+              expectedRevisionId: target.expectedRevisionId,
+            },
+          }),
+      returnFocus,
+    });
+  }
+
+  function cancelSaveAnswer(): void {
+    if (saveAnswerPending) return;
+    const returnFocus = saveAnswerDialog?.returnFocus;
+    setSaveAnswerDialog(undefined);
+    setSaveAnswerError(undefined);
+    window.requestAnimationFrame(() => {
+      if (returnFocus?.isConnected) returnFocus.focus();
+    });
+  }
+
+  async function saveSelectedAnswer(): Promise<void> {
+    const dialog = saveAnswerDialog;
+    if (dialog === undefined || saveAnswerPending) return;
+    setSaveAnswerPending(true);
+    setSaveAnswerError(undefined);
+    try {
+      const { returnFocus: _returnFocus, ...request } = dialog;
+      const saved = await window.piDeck.savedAnswers.save(request);
+      setSaveAnswerDialog(undefined);
+      setOutputRevisionTargets((current) => {
+        const { [dialog.runtimeId]: _savedTarget, ...remaining } = current;
+        return remaining;
+      });
+      setUiMessage(
+        dialog.target === undefined
+          ? `Saved “${saved.title}” to Outputs.`
+          : `Saved revision ${saved.displayNumber} of “${saved.title}”.`,
+      );
+      showSavedAnswers(saved.workspaceId, saved.outputId);
+    } catch (error) {
+      setSaveAnswerError(
+        error instanceof Error ? error.message : String(error),
+      );
+    } finally {
+      setSaveAnswerPending(false);
+    }
+  }
+
   const workflowView: WorkflowSurface | undefined =
     primaryView.kind === "workflow" ? primaryView.view : undefined;
   const activityScope: WorkScope =
@@ -2098,6 +2253,17 @@ export function App(): ReactElement {
     activityFiltersByScope[activityFilterScopeKey] ?? "all";
   const activitySearchQuery =
     activitySearchQueriesByScope[activityFilterScopeKey] ?? "";
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(
+        OUTPUT_REVISION_TARGETS_KEY,
+        JSON.stringify(outputRevisionTargets),
+      );
+    } catch {
+      // A revision can still be completed in the current renderer lifetime.
+    }
+  }, [outputRevisionTargets]);
 
   useEffect(() => {
     const systemTheme = window.matchMedia("(prefers-color-scheme: dark)");
@@ -4253,6 +4419,12 @@ export function App(): ReactElement {
           );
         }
       }
+      // The resumed worker owns a new renderer id for the same native file.
+      // Rebind before publishing the replacement row so persistence requeues
+      // any saved-row restoration that raced this renderer-row replacement.
+      reportComposerDraftPersistenceResult(
+        composerDraftPersistenceRef.current!.migrateSession(session, resumed),
+      );
       // Use the state at completion time: another runtime can stream while
       // this saved session is being resumed. This merge is intentionally not
       // guarded by navigation: the worker must remain retained in background.
@@ -4627,6 +4799,12 @@ export function App(): ReactElement {
       );
       composerDraftsRef.current = materializedComposerDrafts;
       setComposerDrafts(materializedComposerDrafts);
+      setOutputRevisionTargets((current) => {
+        const draftTarget = current[draftSession.id];
+        if (draftTarget === undefined) return current;
+        const { [draftSession.id]: _draftTarget, ...remaining } = current;
+        return { ...remaining, [initializedSession.id]: draftTarget };
+      });
       if (initializedSession.backendMode === "real") {
         rememberPiDefaults(initializedSession);
         loadRealCapabilities(initializedSession.id);
@@ -4869,7 +5047,7 @@ export function App(): ReactElement {
           "Attachment owner generation is unavailable; reselect attachments and retry.",
         );
       }
-      await window.piDeck.chat.prompt({
+      const delivery = await window.piDeck.chat.prompt({
         runtimeId,
         text: prompt,
         attachments: promptAttachments.map((attachment) => ({
@@ -4883,6 +5061,17 @@ export function App(): ReactElement {
           ? { workerOverrides: overrides }
           : {}),
       });
+      if (delivery?.deliveryStatus === "unknown") {
+        // This outcome is returned from preload instead of rejected because
+        // Electron context bridge error serialization drops custom Error
+        // fields. Re-create it locally so the existing uncertain-receipt path
+        // retains the explicit, schema-validated classification.
+        const error = new Error(delivery.message) as Error & {
+          deliveryStatus: "unknown";
+        };
+        error.deliveryStatus = "unknown";
+        throw error;
+      }
       if (submissionSession !== undefined) {
         clearAcceptedComposerDraft(
           submissionSession,
@@ -4904,8 +5093,23 @@ export function App(): ReactElement {
       setWorkerOverrides((current) => ({ ...current, [runtimeId]: {} }));
     } catch (error) {
       let submittedDraftWasRestored = false;
+      const promptDeliveryUnconfirmed =
+        destination === "parent" && isPromptDeliveryUnconfirmedError(error);
       if (destination === "parent") {
         unblockAttachmentOwner(runtimeId);
+        if (promptDeliveryUnconfirmed) {
+          const ownerId = attachmentOwnersBySession.current.get(runtimeId);
+          if (ownerId !== undefined) {
+            releaseSelectedAttachmentTokens(
+              ownerId,
+              rejectedSubmissionTokensToRelease(
+                destination,
+                false,
+                promptAttachments,
+              ),
+            );
+          }
+        }
       } else {
         // Main rejected the submission, so it has not consumed these tokens.
         // Restore it only when the user has not begun a newer draft; otherwise
@@ -4949,29 +5153,41 @@ export function App(): ReactElement {
           }
         }
       }
-      setComposerError(error instanceof Error ? error.message : String(error));
+      const message = error instanceof Error ? error.message : String(error);
+      setComposerError(
+        promptDeliveryUnconfirmed
+          ? "A previous send may have been accepted by Pi. Check session history before recovering or retrying; retrying may duplicate work."
+          : message,
+      );
       if (destination === "parent") {
-        submittedDraftWasRestored = restoreRejectedComposerDraft(
-          runtimeId,
-          prompt,
-          promptAttachments,
-          submissionRevision,
-        );
-        if (!submittedDraftWasRestored) {
-          const ownerId = attachmentOwnersBySession.current.get(runtimeId);
-          if (ownerId !== undefined) {
-            releaseSelectedAttachmentTokens(
-              ownerId,
-              rejectedSubmissionTokensToRelease(
-                destination,
-                submittedDraftWasRestored,
-                promptAttachments,
-              ),
-            );
-          }
-        }
-      }
-      if (submissionSession !== undefined) {
+        submittedDraftWasRestored = settleFailedParentPromptSubmission({
+          promptDeliveryUnconfirmed,
+          submissionSession,
+          composerDraftPersistence: composerDraftPersistenceRef.current!,
+          restoreRejectedComposerDraft: () =>
+            restoreRejectedComposerDraft(
+              runtimeId,
+              prompt,
+              promptAttachments,
+              submissionRevision,
+            ),
+          onRejectedDraftNotRestored: () => {
+            const ownerId = attachmentOwnersBySession.current.get(runtimeId);
+            if (ownerId !== undefined) {
+              releaseSelectedAttachmentTokens(
+                ownerId,
+                rejectedSubmissionTokensToRelease(
+                  destination,
+                  false,
+                  promptAttachments,
+                ),
+              );
+            }
+          },
+          reportComposerDraftPersistenceResult,
+          publishPendingComposerRecovery,
+        });
+      } else if (submissionSession !== undefined) {
         reportComposerDraftPersistenceResult(
           composerDraftPersistenceRef.current!.finishSubmission(
             submissionSession,
@@ -4981,13 +5197,14 @@ export function App(): ReactElement {
         );
         publishPendingComposerRecovery(submissionSession);
       }
-      const message = error instanceof Error ? error.message : String(error);
       setSessions((current) =>
         current.map((session) =>
           session.id !== runtimeId
             ? session
             : destination === "parent"
-              ? markPromptDeliveryFailed(session, message)
+              ? promptDeliveryUnconfirmed
+                ? markPromptDeliveryUnconfirmed(session, message)
+                : markPromptDeliveryFailed(session, message)
               : appendNonfatalDiagnostic(session, {
                   tone: "error",
                   content: `Task submission failed: ${message}`,
@@ -5349,6 +5566,10 @@ export function App(): ReactElement {
       setUiMessage("There is no failed prompt available to retry.");
       return;
     }
+    // Runtime terminal evidence can make Retry prompt visible before a lost
+    // acknowledgement classifies this send as unconfirmed. Do not let that
+    // control bypass the pending-submission quarantine.
+    if (submissionBlockedByPendingRecovery(selectedSession)) return;
     void sendPrompt(selectedSession.id, retry.text, retry.attachments);
   }
 
@@ -6932,19 +7153,109 @@ export function App(): ReactElement {
     const next = creation.draft;
     setComposerError(null);
     setSessions((items) =>
-      mergeSessions(
-        [next],
-        items.filter(
-          (item) =>
-            item.draftSession !== true ||
-            hasComposerDraft(composerDraftsRef.current, item.id) ||
-            item.workspaceId !== creationWorkspace.id,
-        ),
+      replaceWorkspaceDraft(
+        items,
+        next,
+        creationWorkspace.id,
+        composerDraftsRef.current,
       ),
     );
     showSessionDetail(next.id, origin, generation);
     setUiMessage(
       "Created a new session. Pi will start when you send the first prompt.",
+    );
+  }
+
+  async function handleReviseOutput(detail: SavedAnswerDetail): Promise<void> {
+    const generation = beginNavigation();
+    const workspace = workspaceForId(
+      detail.workspaceId,
+      currentWorkspaceRef.current,
+      workspaces,
+    );
+    if (workspace === undefined) {
+      setUiMessage("The output workspace is no longer available.");
+      return;
+    }
+    const origin = workOriginForPrimaryView(
+      primaryView,
+      currentWorkspaceRef.current.id,
+    );
+    let creation: { activation: WorkspaceRef; draft: SessionViewModel };
+    try {
+      creation = await createDraftAfterWorkspaceActivation({
+        workspaceId: workspace.id,
+        activation: activateWorkspaceForSessionCreation(workspace, generation),
+        readDefaults: () => projectModelConfigurationRef.current,
+        createDraft: (creationWorkspace, latestConfiguration) => {
+          const activeBackendMode = backendModeRef.current;
+          return draftSessionForWorkspace(
+            creationWorkspace,
+            createId("draft-session"),
+            activeBackendMode,
+            activeBackendMode === "real" ? latestConfiguration : undefined,
+          );
+        },
+      });
+    } catch (error) {
+      if (isNavigationCurrent(generation)) {
+        setUiMessage(
+          `Could not open the output workspace: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+      return;
+    }
+    if (!isNavigationCurrent(generation)) return;
+
+    const creationWorkspace = creation.activation;
+    const next = creation.draft;
+    next.title = `Revise ${detail.title}`.slice(0, 240);
+    const feedback = detail.reviews
+      .filter(
+        (event) => event.revisionId === detail.selectedRevisionId && event.note,
+      )
+      .map((event) => `- ${event.note}`)
+      .join("\n");
+    const revisionPrompt = [
+      `Revise the pinned text deliverable “${detail.title}” (revision ${detail.selectedDisplayNumber}).`,
+      feedback
+        ? `Review feedback:\n${feedback}`
+        : "No review feedback was recorded.",
+      "Return the complete revised deliverable. Preserve anything that does not need to change.",
+      "\n--- PINNED DELIVERABLE START ---",
+      detail.content,
+      "--- PINNED DELIVERABLE END ---",
+    ].join("\n\n");
+
+    setComposerError(null);
+    setSessions((items) =>
+      replaceWorkspaceDraft(
+        items,
+        next,
+        creationWorkspace.id,
+        // Workspace activation awaits before this callback runs. Read the ref
+        // so text entered during that await retains its existing draft.
+        composerDraftsRef.current,
+      ),
+    );
+    setComposerDrafts((items) =>
+      updateComposerDraft(items, next.id, (current) => ({
+        ...current,
+        text: revisionPrompt,
+      })),
+    );
+    setOutputRevisionTargets((current) => ({
+      ...current,
+      [next.id]: {
+        outputId: detail.outputId,
+        expectedRevisionId: detail.revisionId,
+        title: detail.title,
+        displayNumber: detail.selectedDisplayNumber,
+      },
+    }));
+    showSessionDetail(next.id, origin, generation);
+    setUiMessage(
+      `Created a draft pinned to revision ${detail.selectedDisplayNumber}. Send it, then save the completed response as the next revision.`,
     );
   }
 
@@ -7064,165 +7375,180 @@ export function App(): ReactElement {
     }
   }
 
+  const selectedOutputRevisionTarget =
+    outputRevisionTargets[selectedSession.id];
   const composer = (
-    <Composer
-      value={draft}
-      isWorking={isWorking}
-      status={selectedSession.status}
-      canSend={canSend || canSendTask}
-      canSendTask={canSendTask}
-      canIntervene={canIntervene}
-      isPlanningTask={pendingTaskSubmissions[selectedSession.id] !== undefined}
-      knownExtensionCommand={knownExtensionCommand}
-      error={composerError}
-      pendingSubmissionRecovery={pendingComposerRecoveries[selectedSession.id]}
-      attachments={attachments}
-      slashOpen={slashOpen}
-      slashCommands={filteredCommands}
-      selectedModel={selectedModel}
-      backendLabel={backendLabel(selectedSession)}
-      realModels={realModels}
-      activeRealModel={activeRealModel}
-      realThinkingLevels={availableRealThinkingLevels}
-      selectedSession={selectedSession}
-      allowAttachments={true}
-      multitaskMode={multitaskState?.mode}
-      multitaskTasks={multitaskState?.tasks ?? []}
-      multitaskSettings={multitaskState?.settings ?? {}}
-      multitaskDestination={promptDestination}
-      workerOverrides={promptWorkerOverrides}
-      onSetPromptDestination={(destination) =>
-        setWorkInParentOnce((current) => ({
-          ...current,
-          [selectedSession.id]: destination === "parent",
-        }))
-      }
-      onSetWorkerOverrides={(overrides) =>
-        setWorkerOverrides((current) => ({
-          ...current,
-          [selectedSession.id]: overrides,
-        }))
-      }
-      onUpdateWorkerDefaults={(settings) => {
-        const previousSettings = multitaskState?.settings ?? {};
-        const generation =
-          (workerSettingsGenerationRef.current[selectedSession.id] ?? 0) + 1;
-        workerSettingsGenerationRef.current[selectedSession.id] = generation;
-        setMultitask((current) => ({
-          ...current,
-          [selectedSession.id]: {
-            ...(current[selectedSession.id] ?? {
-              runtimeId: selectedSession.id,
-              mode: "sequential" as const,
-              activeCount: 0,
-              activeLimit: 10,
-              tasks: [],
-            }),
-            settings,
-          },
-        }));
-        if (!selectedSession.runtimeBacked) return;
-        void window.piDeck.multitask
-          .updateSettings({ runtimeId: selectedSession.id, settings })
-          .then((updated) => {
-            if (
-              workerSettingsGenerationRef.current[selectedSession.id] !==
-              generation
-            )
-              return;
-            setMultitask((current) => ({
-              ...current,
-              [selectedSession.id]: {
-                ...(current[selectedSession.id] ?? {
-                  runtimeId: selectedSession.id,
-                  mode: "parallel" as const,
-                  activeCount: 0,
-                  activeLimit: 10,
-                  tasks: [],
-                }),
-                settings: updated,
-              },
-            }));
-          })
-          .catch((error) => {
-            if (
-              workerSettingsGenerationRef.current[selectedSession.id] !==
-              generation
-            )
-              return;
-            setMultitask((current) => ({
-              ...current,
-              [selectedSession.id]: {
-                ...(current[selectedSession.id] ??
-                  initialDraftMultitaskState(selectedSession.id)),
-                settings: previousSettings,
-              },
-            }));
-            setComposerError(
-              `Worker defaults unavailable: ${error instanceof Error ? error.message : String(error)}`,
-            );
-          });
-      }}
-      onToggleMultitask={() => {
-        const mode =
-          multitaskState?.mode === "parallel" ? "sequential" : "parallel";
-        if (selectedSession.draftSession) {
+    <>
+      {selectedOutputRevisionTarget === undefined ? null : (
+        <div className="output-revision-target" role="status">
+          Revising <strong>{selectedOutputRevisionTarget.title}</strong>,
+          revision {selectedOutputRevisionTarget.displayNumber}. The completed
+          response can be saved as its next revision.
+        </div>
+      )}
+      <Composer
+        value={draft}
+        isWorking={isWorking}
+        status={selectedSession.status}
+        canSend={canSend || canSendTask}
+        canSendTask={canSendTask}
+        canIntervene={canIntervene}
+        isPlanningTask={
+          pendingTaskSubmissions[selectedSession.id] !== undefined
+        }
+        knownExtensionCommand={knownExtensionCommand}
+        error={composerError}
+        pendingSubmissionRecovery={
+          pendingComposerRecoveries[selectedSession.id]
+        }
+        attachments={attachments}
+        slashOpen={slashOpen}
+        slashCommands={filteredCommands}
+        selectedModel={selectedModel}
+        backendLabel={backendLabel(selectedSession)}
+        realModels={realModels}
+        activeRealModel={activeRealModel}
+        realThinkingLevels={availableRealThinkingLevels}
+        selectedSession={selectedSession}
+        allowAttachments={true}
+        multitaskMode={multitaskState?.mode}
+        multitaskTasks={multitaskState?.tasks ?? []}
+        multitaskSettings={multitaskState?.settings ?? {}}
+        multitaskDestination={promptDestination}
+        workerOverrides={promptWorkerOverrides}
+        onSetPromptDestination={(destination) =>
+          setWorkInParentOnce((current) => ({
+            ...current,
+            [selectedSession.id]: destination === "parent",
+          }))
+        }
+        onSetWorkerOverrides={(overrides) =>
+          setWorkerOverrides((current) => ({
+            ...current,
+            [selectedSession.id]: overrides,
+          }))
+        }
+        onUpdateWorkerDefaults={(settings) => {
+          const previousSettings = multitaskState?.settings ?? {};
+          const generation =
+            (workerSettingsGenerationRef.current[selectedSession.id] ?? 0) + 1;
+          workerSettingsGenerationRef.current[selectedSession.id] = generation;
           setMultitask((current) => ({
             ...current,
             [selectedSession.id]: {
-              runtimeId: selectedSession.id,
-              mode,
-              settings: current[selectedSession.id]?.settings ?? {},
-              activeCount: current[selectedSession.id]?.activeCount ?? 0,
-              activeLimit: current[selectedSession.id]?.activeLimit ?? 10,
-              tasks: current[selectedSession.id]?.tasks ?? [],
+              ...(current[selectedSession.id] ?? {
+                runtimeId: selectedSession.id,
+                mode: "sequential" as const,
+                activeCount: 0,
+                activeLimit: 10,
+                tasks: [],
+              }),
+              settings,
             },
           }));
-          return;
-        }
-        if (!selectedSession.runtimeBacked) return;
-        void window.piDeck.multitask
-          .updateMode({ runtimeId: selectedSession.id, mode })
-          .then((state) =>
+          if (!selectedSession.runtimeBacked) return;
+          void window.piDeck.multitask
+            .updateSettings({ runtimeId: selectedSession.id, settings })
+            .then((updated) => {
+              if (
+                workerSettingsGenerationRef.current[selectedSession.id] !==
+                generation
+              )
+                return;
+              setMultitask((current) => ({
+                ...current,
+                [selectedSession.id]: {
+                  ...(current[selectedSession.id] ?? {
+                    runtimeId: selectedSession.id,
+                    mode: "parallel" as const,
+                    activeCount: 0,
+                    activeLimit: 10,
+                    tasks: [],
+                  }),
+                  settings: updated,
+                },
+              }));
+            })
+            .catch((error) => {
+              if (
+                workerSettingsGenerationRef.current[selectedSession.id] !==
+                generation
+              )
+                return;
+              setMultitask((current) => ({
+                ...current,
+                [selectedSession.id]: {
+                  ...(current[selectedSession.id] ??
+                    initialDraftMultitaskState(selectedSession.id)),
+                  settings: previousSettings,
+                },
+              }));
+              setComposerError(
+                `Worker defaults unavailable: ${error instanceof Error ? error.message : String(error)}`,
+              );
+            });
+        }}
+        onToggleMultitask={() => {
+          const mode =
+            multitaskState?.mode === "parallel" ? "sequential" : "parallel";
+          if (selectedSession.draftSession) {
             setMultitask((current) => ({
               ...current,
-              [state.runtimeId]: state,
-            })),
-          )
-          .catch((error) =>
-            setComposerError(
-              `Multitasking mode unavailable: ${error instanceof Error ? error.message : String(error)}`,
-            ),
-          );
-      }}
-      onChange={handleDraftChange}
-      onKeyDown={handleComposerKeyDown}
-      onDismissSlashPicker={handleDismissSlashPicker}
-      onSend={handleSend}
-      onSteer={handleSteer}
-      onFollowUp={handleFollowUp}
-      onRunExtensionCommand={handleRunExtensionCommand}
-      onRecoverPendingSubmission={() =>
-        recoverPendingComposerSubmission(selectedSession.id)
-      }
-      onDiscardPendingSubmission={() =>
-        discardPendingComposerSubmission(selectedSession.id)
-      }
-      onAbort={handleAbort}
-      onPickAttachments={() => void handlePickAttachments()}
-      onImportDroppedFileAttachments={(files) =>
-        void handleImportDroppedFileAttachments(files)
-      }
-      onImportImageAttachments={(files) =>
-        void handleImportImageAttachments(files)
-      }
-      onSetModel={(provider, modelId) =>
-        void handleSetRealModel(provider, modelId)
-      }
-      onSetThinking={(level) => void handleSetRealThinking(level)}
-      onRemoveAttachment={handleRemoveAttachment}
-      onSelectCommand={handleSelectCommand}
-    />
+              [selectedSession.id]: {
+                runtimeId: selectedSession.id,
+                mode,
+                settings: current[selectedSession.id]?.settings ?? {},
+                activeCount: current[selectedSession.id]?.activeCount ?? 0,
+                activeLimit: current[selectedSession.id]?.activeLimit ?? 10,
+                tasks: current[selectedSession.id]?.tasks ?? [],
+              },
+            }));
+            return;
+          }
+          if (!selectedSession.runtimeBacked) return;
+          void window.piDeck.multitask
+            .updateMode({ runtimeId: selectedSession.id, mode })
+            .then((state) =>
+              setMultitask((current) => ({
+                ...current,
+                [state.runtimeId]: state,
+              })),
+            )
+            .catch((error) =>
+              setComposerError(
+                `Multitasking mode unavailable: ${error instanceof Error ? error.message : String(error)}`,
+              ),
+            );
+        }}
+        onChange={handleDraftChange}
+        onKeyDown={handleComposerKeyDown}
+        onDismissSlashPicker={handleDismissSlashPicker}
+        onSend={handleSend}
+        onSteer={handleSteer}
+        onFollowUp={handleFollowUp}
+        onRunExtensionCommand={handleRunExtensionCommand}
+        onRecoverPendingSubmission={() =>
+          recoverPendingComposerSubmission(selectedSession.id)
+        }
+        onDiscardPendingSubmission={() =>
+          discardPendingComposerSubmission(selectedSession.id)
+        }
+        onAbort={handleAbort}
+        onPickAttachments={() => void handlePickAttachments()}
+        onImportDroppedFileAttachments={(files) =>
+          void handleImportDroppedFileAttachments(files)
+        }
+        onImportImageAttachments={(files) =>
+          void handleImportImageAttachments(files)
+        }
+        onSetModel={(provider, modelId) =>
+          void handleSetRealModel(provider, modelId)
+        }
+        onSetThinking={(level) => void handleSetRealThinking(level)}
+        onRemoveAttachment={handleRemoveAttachment}
+        onSelectCommand={handleSelectCommand}
+      />
+    </>
   );
 
   return (
@@ -7242,6 +7568,7 @@ export function App(): ReactElement {
           activityTotalCount={activityTotalCount}
           onSelect={handleSelectSession}
           onOpenActivity={handleToggleActivity}
+          onOpenSavedAnswers={() => showSavedAnswers(currentWorkspace.id)}
           onOpenWorkflows={handleOpenWorkflows}
           onOpenWorkspaceActivity={handleOpenWorkspaceActivity}
           onSelectWorkspace={(workspace) =>
@@ -7288,9 +7615,11 @@ export function App(): ReactElement {
         aria-label={
           primaryView.kind === "workflow"
             ? "Agent Workflows"
-            : primaryView.kind === "work"
-              ? workScopeLabel(primaryView.scope, activityWorkspaceNameById)
-              : "Pi Deck chat workspace"
+            : primaryView.kind === "savedAnswers"
+              ? "Outputs"
+              : primaryView.kind === "work"
+                ? workScopeLabel(primaryView.scope, activityWorkspaceNameById)
+                : "Pi Deck chat workspace"
         }
         data-load-state={loadState.state}
         data-primary-view={primaryView.kind}
@@ -7309,7 +7638,9 @@ export function App(): ReactElement {
               ? workScopeLabel(primaryView.scope, activityWorkspaceNameById)
               : primaryView.kind === "workflow"
                 ? "Agent Workflows"
-                : selectedSession.title
+                : primaryView.kind === "savedAnswers"
+                  ? "Outputs"
+                  : selectedSession.title
           }
           showSessionControls={primaryView.kind === "session"}
           selectedSession={selectedSession}
@@ -7537,6 +7868,35 @@ export function App(): ReactElement {
               ) : null}
             </Suspense>
           </div>
+        ) : primaryView.kind === "savedAnswers" ? (
+          <SavedAnswers
+            workspaceId={primaryView.workspaceId}
+            workspaceName={
+              activityWorkspaceNameById[primaryView.workspaceId] ??
+              "this workspace"
+            }
+            workspaces={workspaces}
+            {...(primaryView.selectedOutputId === undefined
+              ? {}
+              : { selectedOutputId: primaryView.selectedOutputId })}
+            onSelect={(outputId, workspaceId) =>
+              setPrimaryView((current) =>
+                current.kind === "savedAnswers"
+                  ? outputId === undefined
+                    ? (({ selectedOutputId: _selected, ...rest }) => rest)(
+                        current,
+                      )
+                    : {
+                        ...current,
+                        workspaceId: workspaceId ?? current.workspaceId,
+                        selectedOutputId: outputId,
+                      }
+                  : current,
+              )
+            }
+            onRevise={(detail) => void handleReviseOutput(detail)}
+            onBack={() => setPrimaryView(primaryView.origin)}
+          />
         ) : primaryView.kind === "work" ? (
           activityInboxModel === undefined ? null : (
             <ActivityInbox
@@ -7597,6 +7957,7 @@ export function App(): ReactElement {
                     onRespondToExtensionUi={onRespondToChatTimelineExtensionUi}
                     onRetrySession={onRetryChatTimelineSession}
                     onCopyDiagnostics={onCopyChatTimelineDiagnostics}
+                    onSaveAnswer={requestSaveAnswer}
                   />
                   {composer}
                 </>
@@ -7604,6 +7965,22 @@ export function App(): ReactElement {
             </div>
           </div>
         )}
+        {saveAnswerDialog !== undefined ? (
+          <SaveAnswerDialog
+            state={saveAnswerDialog}
+            pending={saveAnswerPending}
+            {...(saveAnswerError === undefined
+              ? {}
+              : { error: saveAnswerError })}
+            onTitleChange={(title) =>
+              setSaveAnswerDialog((current) =>
+                current === undefined ? current : { ...current, title },
+              )
+            }
+            onCancel={cancelSaveAnswer}
+            onSave={() => void saveSelectedAnswer()}
+          />
+        ) : null}
         {workspaceDialog !== undefined ? (
           <WorkspaceManagementDialog
             busy={workspaceDialogBusy}
@@ -8090,15 +8467,28 @@ function resumedSessionForCurrentSavedRow(
     resumed.failureKind !== "auth-required" &&
     resumed.authVerified !== true;
   const originalDiagnostic = currentSession.lastError;
+  const reconciledTimeline = reconcileRecoveredInterventionTimeline(
+    resumed.timeline,
+    currentSession.timeline,
+  );
+  const recoveredTimeline = [
+    ...reconciledTimeline.recovered,
+    ...reconciledTimeline.current.filter(
+      (item) =>
+        !reconciledTimeline.recovered.some(
+          (recoveredItem) => recoveredItem.id === item.id,
+        ),
+    ),
+  ];
   const timeline =
     authStillPending &&
     originalDiagnostic !== undefined &&
-    !resumed.timeline.some(
+    !recoveredTimeline.some(
       (item) =>
         item.kind === "diagnostic" && item.content === originalDiagnostic,
     )
       ? [
-          ...resumed.timeline,
+          ...recoveredTimeline,
           {
             id: createId("auth-diagnostic"),
             kind: "diagnostic" as const,
@@ -8107,9 +8497,10 @@ function resumedSessionForCurrentSavedRow(
             createdAt: formatTime(),
           },
         ]
-      : resumed.timeline;
+      : recoveredTimeline;
   return {
     ...resumed,
+    timeline,
     // Pi snapshots carry the generated title. Preserve the latest local
     // display-name override, including a rename that was queued while this
     // saved session was being resumed.
@@ -8292,6 +8683,24 @@ function migrateComposerDraftIdentities(
           },
         };
   }, drafts);
+}
+
+/** Replace an empty workspace draft without evicting a draft the user typed in. */
+function replaceWorkspaceDraft(
+  sessions: SessionViewModel[],
+  replacement: SessionViewModel,
+  workspaceId: string,
+  composerDrafts: ComposerDraftsBySession,
+): SessionViewModel[] {
+  return mergeSessions(
+    [replacement],
+    sessions.filter(
+      (session) =>
+        session.draftSession !== true ||
+        hasComposerDraft(composerDrafts, session.id) ||
+        session.workspaceId !== workspaceId,
+    ),
+  );
 }
 
 function mergeSessions(
@@ -9345,7 +9754,17 @@ function timelineFromMessages(messages: ChatMessage[]): TimelineItem[] {
 
     if (message.role === "assistant") {
       return content.trim().length > 0
-        ? [{ id, kind: "assistant", content, createdAt }]
+        ? [
+            {
+              id,
+              kind: "assistant",
+              content,
+              createdAt,
+              ...(message.id?.trim()
+                ? { sourceMessageId: message.id.trim() }
+                : {}),
+            },
+          ]
         : [];
     }
 
@@ -9442,8 +9861,8 @@ function findActiveRealModel(
 
 /**
  * An authoritative active model can identify the selected model when discovery
- * returned no inventory. Keep it out of the catalog; prefer matching runtime
- * state, then the default owned by this session's workspace.
+ * returned no matching inventory entry. Keep it out of the catalog; prefer
+ * matching runtime state, then the default owned by this session's workspace.
  */
 function findComposerActiveRealModel(
   session: SessionViewModel,
@@ -9467,7 +9886,7 @@ function findComposerActiveRealModel(
   // realModels can be a workspace fallback when runtime inventory is empty.
   // Never let that less-specific catalog shadow matching runtime state.
   const discovered = findActiveRealModel(session, realModels);
-  if (discovered !== undefined || realModels.length > 0) return discovered;
+  if (discovered !== undefined) return discovered;
   const configured = draftDefaultsForWorkspace(
     configurations,
     session.workspaceId,
@@ -9533,6 +9952,134 @@ function appendNonfatalDiagnostic(
       },
     ],
   };
+}
+
+interface FailedParentPromptSubmissionSettlementOptions {
+  promptDeliveryUnconfirmed: boolean;
+  submissionSession: ComposerDraftSessionIdentitySource | undefined;
+  composerDraftPersistence: Pick<
+    ComposerDraftPersistence,
+    "reconcilePendingSubmission" | "finishSubmission"
+  >;
+  restoreRejectedComposerDraft: () => boolean;
+  onRejectedDraftNotRestored: () => void;
+  reportComposerDraftPersistenceResult: (
+    result: ComposerDraftPersistenceResult,
+  ) => void;
+  publishPendingComposerRecovery: (
+    session: ComposerDraftSessionIdentitySource,
+  ) => void;
+}
+
+function settleFailedParentPromptSubmission(
+  options: FailedParentPromptSubmissionSettlementOptions,
+): boolean {
+  let submittedDraftWasRestored = false;
+  if (!options.promptDeliveryUnconfirmed) {
+    submittedDraftWasRestored = options.restoreRejectedComposerDraft();
+    if (!submittedDraftWasRestored) {
+      options.onRejectedDraftNotRestored();
+    }
+  }
+  if (options.submissionSession !== undefined) {
+    options.reportComposerDraftPersistenceResult(
+      options.promptDeliveryUnconfirmed
+        ? options.composerDraftPersistence.reconcilePendingSubmission(
+            options.submissionSession,
+            "unknown",
+          )
+        : options.composerDraftPersistence.finishSubmission(
+            options.submissionSession,
+            "rejected",
+            submittedDraftWasRestored,
+          ),
+    );
+    options.publishPendingComposerRecovery(options.submissionSession);
+  }
+  return submittedDraftWasRestored;
+}
+
+function isPromptDeliveryUnconfirmedError(error: unknown): boolean {
+  // Preload errors cross Electron's isolated-world boundary, so their Error
+  // prototype is not guaranteed to be this renderer's Error.prototype. The
+  // explicit status is schema-validated at IPC boundaries; retain it without
+  // relying on cross-realm instanceof identity.
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    (error as { deliveryStatus?: unknown }).deliveryStatus === "unknown"
+  );
+}
+
+function promptDeliveryUnconfirmedDiagnostic(message: string): string {
+  return `Prompt delivery unconfirmed: Pi may have received this prompt before confirmation failed. Check session history before recovering or retrying; retrying may duplicate work. Details: ${message}`;
+}
+
+function markPromptDeliveryUnconfirmed(
+  session: SessionViewModel,
+  message: string,
+): SessionViewModel {
+  const currentLifecycle = resolveSessionLifecycle(session);
+  const diagnostic = promptDeliveryUnconfirmedDiagnostic(message);
+  if (currentLifecycle.phase === "terminal") {
+    return appendNonfatalDiagnostic(session, {
+      tone: "error",
+      content: diagnostic,
+    });
+  }
+  if (hasPromptRuntimeProgressEvidence(session, currentLifecycle)) {
+    return appendNonfatalDiagnostic(
+      {
+        ...session,
+        lastError: diagnostic,
+      },
+      { tone: "error", content: diagnostic },
+    );
+  }
+  return appendNonfatalDiagnostic(
+    {
+      ...session,
+      lifecycle: inactiveSessionLifecycle,
+      status: "idle",
+      baseState: "idle",
+      awaitingAgentEnd: false,
+      providerErrorObserved: false,
+      overlays: {
+        ...session.overlays,
+        streaming: false,
+        toolRunning: false,
+        compacting: false,
+        retrying: false,
+      },
+      subtitle: "Delivery unconfirmed · Pi may have received the prompt",
+      lastError: diagnostic,
+      workingStartedAtMs: undefined,
+      lastRuntimeEventLabel:
+        "Prompt delivery unconfirmed; recover or discard before retrying",
+      updatedAt: "Now",
+      updatedAtMs: Date.now(),
+    },
+    { tone: "error", content: diagnostic },
+  );
+}
+
+function hasPromptRuntimeProgressEvidence(
+  session: SessionViewModel,
+  lifecycle: ReturnType<typeof resolveSessionLifecycle>,
+): boolean {
+  return (
+    lifecycle.phase === "aborting" ||
+    session.awaitingAgentEnd === true ||
+    session.status === "working" ||
+    session.status === "aborting" ||
+    session.baseState === "working" ||
+    session.overlays.streaming ||
+    session.overlays.toolRunning ||
+    session.overlays.compacting ||
+    session.overlays.retrying ||
+    session.overlays.needsUserInput ||
+    hasActiveTimelineOutput(session.timeline)
+  );
 }
 
 function markPromptDeliveryFailed(
@@ -9622,6 +10169,7 @@ function SessionSidebar(props: {
   activityTotalCount: number;
   onSelect(sessionId: string): void;
   onOpenActivity(): void;
+  onOpenSavedAnswers(): void;
   onOpenWorkflows(): void;
   onOpenWorkspaceActivity(workspaceId: string): void;
   onSelectWorkspace(workspace: WorkspaceRef): void;
@@ -9959,6 +10507,19 @@ function SessionSidebar(props: {
             </span>
           </span>
         ) : null}
+      </Button>
+      <Button
+        className={`sidebar-new-chat saved-answers-button ${
+          props.primaryView.kind === "savedAnswers" ? "active" : ""
+        }`}
+        aria-current={
+          props.primaryView.kind === "savedAnswers" ? "page" : undefined
+        }
+        aria-pressed={props.primaryView.kind === "savedAnswers"}
+        onClick={props.onOpenSavedAnswers}
+      >
+        <Archive aria-hidden="true" size={16} strokeWidth={1.75} />
+        Outputs
       </Button>
       <Button
         className={`sidebar-new-chat workflow-inbox-button ${
@@ -11754,6 +12315,101 @@ function StarterPage(props: { composer: ReactElement }): ReactElement {
   );
 }
 
+function SaveAnswerDialog(props: {
+  state: SaveAnswerDialogState;
+  pending: boolean;
+  error?: string;
+  onTitleChange(title: string): void;
+  onCancel(): void;
+  onSave(): void;
+}): ReactElement {
+  const dialogRef = useRef<HTMLDialogElement | null>(null);
+  useEffect(() => {
+    const dialog = dialogRef.current;
+    if (dialog === null) return;
+    if (typeof dialog.showModal === "function") dialog.showModal();
+    else dialog.setAttribute("open", "");
+    return () => {
+      if (dialog.open && typeof dialog.close === "function") dialog.close();
+    };
+  }, []);
+
+  return (
+    <dialog
+      ref={dialogRef}
+      aria-labelledby="save-answer-title"
+      className="workspace-modal save-answer-dialog"
+      onCancel={(event) => {
+        event.preventDefault();
+        if (!props.pending) props.onCancel();
+      }}
+    >
+      <div className="workspace-modal-header">
+        <div>
+          <p className="saved-answers-eyebrow">Local workspace library</p>
+          <h2 id="save-answer-title">
+            {props.state.target === undefined
+              ? "Save as output"
+              : "Save as next revision"}
+          </h2>
+        </div>
+        <IconButton
+          icon={X}
+          label="Cancel save"
+          disabled={props.pending}
+          onClick={props.onCancel}
+        />
+      </div>
+      <form
+        className="workspace-modal-form"
+        onSubmit={(event) => {
+          event.preventDefault();
+          props.onSave();
+        }}
+      >
+        <label>
+          Title
+          <input
+            autoFocus
+            maxLength={240}
+            value={props.state.title}
+            disabled={props.pending || props.state.target !== undefined}
+            onChange={(event) => props.onTitleChange(event.target.value)}
+          />
+        </label>
+        <p className="workspace-modal-note">
+          {props.state.target === undefined
+            ? "Saves this completed assistant response as an exact local text snapshot. It does not call the model again."
+            : "Adds this completed assistant response as the next immutable revision. The previous revision and its review remain available."}
+        </p>
+        <pre className="save-answer-preview">{props.state.assistantText}</pre>
+        {props.error ? (
+          <p className="workspace-modal-warning" role="alert">
+            {props.error}
+          </p>
+        ) : null}
+        <div className="workspace-modal-actions">
+          <Button
+            type="button"
+            disabled={props.pending}
+            onClick={props.onCancel}
+          >
+            Cancel
+          </Button>
+          <Button
+            type="submit"
+            variant="solid"
+            loading={props.pending}
+            disabled={props.state.title.trim().length === 0}
+          >
+            {props.state.target === undefined ? "Save output" : "Save revision"}
+          </Button>
+        </div>
+      </form>
+    </dialog>
+  );
+}
+
 function TranscriptLoading(props: { sessionTitle: string }): ReactElement {
   return (
     <section
@@ -11783,6 +12439,10 @@ const ChatTimeline = memo(function ChatTimeline(props: {
   ): Promise<void>;
   onRetrySession(): void;
   onCopyDiagnostics(): void;
+  onSaveAnswer(
+    item: Extract<TimelineItem, { kind: "assistant" }>,
+    returnFocus: HTMLButtonElement,
+  ): void;
 }): ReactElement {
   const hasItems = props.session.timeline.length > 0;
   const showPendingAgent =
@@ -12372,6 +13032,8 @@ const ChatTimeline = memo(function ChatTimeline(props: {
               <TimelineRow
                 key={item.item.id}
                 item={item.item}
+                canSaveAnswer={props.session.runtimeBacked}
+                onSaveAnswer={props.onSaveAnswer}
                 onDetailsSummaryClick={handleTimelineDetailsSummaryClick}
                 onDetailsToggle={handleTimelineDetailsToggle}
               />
@@ -13060,6 +13722,11 @@ function formatAgentActivityState(state: AgentActivityState): string {
 
 function TimelineRow(props: {
   item: TimelineItem;
+  canSaveAnswer: boolean;
+  onSaveAnswer(
+    item: Extract<TimelineItem, { kind: "assistant" }>,
+    returnFocus: HTMLButtonElement,
+  ): void;
   onDetailsSummaryClick(event: ReactMouseEvent<HTMLElement>): void;
   onDetailsToggle(event: SyntheticEvent<HTMLDetailsElement>): void;
 }): ReactElement {
@@ -13114,6 +13781,7 @@ function TimelineRow(props: {
   }
 
   if (props.item.kind === "assistant") {
+    const assistantItem = props.item;
     return (
       <article className="timeline-row assistant-row">
         <div className="assistant-avatar">π</div>
@@ -13125,7 +13793,20 @@ function TimelineRow(props: {
               aria-label="Assistant is streaming"
             />
           ) : null}
-          <time>{props.item.createdAt}</time>
+          <div className="assistant-message-footer">
+            <time>{props.item.createdAt}</time>
+            {props.item.streaming === true || !props.canSaveAnswer ? null : (
+              <Button
+                className="save-answer-button"
+                size="sm"
+                onClick={(event) =>
+                  props.onSaveAnswer(assistantItem, event.currentTarget)
+                }
+              >
+                Save as output
+              </Button>
+            )}
+          </div>
         </div>
       </article>
     );
@@ -14622,6 +15303,9 @@ export const __rendererTestHooks = {
   mergeSessionUsageFromRuntimeStatus,
   updateSessionByRuntimeId,
   appendNonfatalDiagnostic,
+  isPromptDeliveryUnconfirmedError,
+  markPromptDeliveryUnconfirmed,
+  settleFailedParentPromptSubmission,
   markPromptDeliveryFailed,
   eventHasUsageMetadata,
   currentSessionForSavedResume,
@@ -14638,6 +15322,7 @@ export const __rendererTestHooks = {
   incomingRuntimeIdentityMigrations,
   migrateComposerDraftIdentities,
   mergeSessions,
+  replaceWorkspaceDraft,
   initialWorkspaceDialogName,
   updateWorkspaceSessionLabels,
   archiveWorkspaceBlockReason,

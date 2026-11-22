@@ -100,6 +100,32 @@ describe("sessionRuntimeReducer", () => {
     ).toBe("completed");
   });
 
+  it("keeps a sending prompt's retry source through a terminal provider error", () => {
+    const sending = {
+      ...session(),
+      status: "sending" as const,
+      baseState: "attaching" as const,
+      retryPrompt: { text: "retry this prompt", attachments: [] },
+    };
+    const started = reduceRuntimeEvent(sending, {
+      type: "agent_start",
+      runtimeId: "runtime-1",
+    } as any);
+    const failed = reduceRuntimeEvent(started, {
+      type: "agent_end",
+      runtimeId: "runtime-1",
+      status: "error",
+      errorMessage: "provider failed",
+    } as any);
+
+    expect(started.retryPrompt).toEqual(sending.retryPrompt);
+    expect(failed).toMatchObject({
+      status: "error",
+      lifecycle: { phase: "terminal", outcome: "failed" },
+      retryPrompt: sending.retryPrompt,
+    });
+  });
+
   it("projects delegated child outcomes separately from the parent tool phase", () => {
     const running = reduceRuntimeEvent(session(), {
       type: "tool_execution_start",
@@ -334,6 +360,40 @@ describe("sessionRuntimeReducer", () => {
       expect(duplicate).toBe(cleared);
     },
   );
+
+  it("quarantines every dialog after an unknown-delivery response", () => {
+    const waiting = reduceRuntimeEvent(session(), {
+      type: "extension_ui_request",
+      runtimeId: "runtime-1",
+      id: "request-1",
+      method: "editor",
+      title: "Edit",
+    } as any);
+    const waitingWithSecondDialog = reduceRuntimeEvent(waiting, {
+      type: "extension_ui_request",
+      runtimeId: "runtime-1",
+      id: "request-2",
+      method: "confirm",
+      title: "Continue?",
+    } as any);
+    const recovered = reduceRuntimeEvent(waitingWithSecondDialog, {
+      type: "extension_ui_response_delivery_unknown",
+      runtimeId: "runtime-1",
+      requestId: "request-1",
+      message: "Delivery is unknown; closing session.",
+    } as any);
+
+    expect(recovered).toMatchObject({
+      status: "error",
+      baseState: "error",
+      pendingExtensionUiRequests: [],
+      overlays: { needsUserInput: false },
+    });
+    expect(recovered.timeline.at(-1)).toMatchObject({
+      kind: "diagnostic",
+      content: "Delivery is unknown; closing session.",
+    });
+  });
 
   it("does not let a duplicate post-terminal update revive active presentation", () => {
     const completed = reduceRuntimeEvent(session(), {
@@ -684,7 +744,7 @@ describe("sessionRuntimeReducer", () => {
       status: "idle",
       overlays: { streaming: false },
       usageStats: { inputTokens: 21, outputTokens: 3, cacheReadTokens: 2 },
-      timeline: [{ id: "steer-aborted", status: "queued" }],
+      timeline: [{ id: "steer-aborted", status: "unconfirmed" }],
     });
   });
 
@@ -725,6 +785,52 @@ describe("sessionRuntimeReducer", () => {
     expect(countOnlyReset.timeline[0]).toMatchObject({ status: "accepted" });
     expect(explicitRemoval.timeline[0]).toMatchObject({ status: "accepted" });
     expect(explicitRemoval.overlays.piQueuedSteeringCount).toBe(0);
+  });
+
+  it("marks queued interventions delivery-unconfirmed and clears queue counts on worker exit", () => {
+    const detached = reduceRuntimeEvent(
+      {
+        ...session(),
+        status: "working",
+        baseState: "working",
+        overlays: {
+          ...emptyOverlays,
+          piQueuedSteeringCount: 1,
+          piQueuedFollowUpCount: 1,
+        },
+        timeline: [
+          markInterventionQueued(
+            createInterventionTimelineItem({
+              id: "steer-1",
+              interventionKind: "steer",
+              content: "Focus the tests",
+              createdAt: "10:00",
+            }),
+          ),
+          markInterventionQueued(
+            createInterventionTimelineItem({
+              id: "follow-up-1",
+              interventionKind: "followUp",
+              content: "Summarize afterward",
+              createdAt: "10:01",
+            }),
+          ),
+        ],
+      },
+      { type: "worker_exit", runtimeId: "runtime-1", code: 1 } as any,
+    );
+
+    expect(detached.overlays).toMatchObject({
+      piQueuedSteeringCount: 0,
+      piQueuedFollowUpCount: 0,
+    });
+    expect(detached.timeline.slice(0, 2)).toMatchObject([
+      { id: "steer-1", status: "unconfirmed" },
+      { id: "follow-up-1", status: "unconfirmed" },
+    ]);
+    expect(detached.timeline[0]).toMatchObject({
+      failureMessage: expect.stringContaining("disconnected"),
+    });
   });
 
   it("uses a durable user message to consume the same intervention item", () => {

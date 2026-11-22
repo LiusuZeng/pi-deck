@@ -134,6 +134,105 @@ test("terminal refresh consumes an id-less intervention after a pre-persistence 
   }
 });
 
+test("lost Pi transport leaves an intervention visibly delivery-unconfirmed", async () => {
+  const root = fs.mkdtempSync(
+    path.join(os.tmpdir(), "pi-deck-intervention-disconnect-"),
+  );
+  const launched = await launch(
+    interventionEnv(root, [
+      "--stream-delay-ms",
+      "5000",
+      "--exit-after-intervention-receipt",
+    ]),
+  );
+  try {
+    const { page } = launched;
+    const composer = page.getByLabel("Prompt text");
+    await composer.fill("start disconnected intervention fixture");
+    await page.getByRole("button", { name: "Send", exact: true }).click();
+    await expect(page.getByRole("button", { name: "Steer" })).toBeVisible();
+
+    const instruction = "Do not claim delivery after disconnect";
+    await composer.fill(instruction);
+    await page.getByRole("button", { name: "Steer" }).click();
+    const intervention = page.locator('[data-intervention-kind="steer"]', {
+      hasText: instruction,
+    });
+    await expect(intervention).toHaveAttribute(
+      "data-intervention-status",
+      "unconfirmed",
+    );
+    await expect(intervention).toHaveAccessibleName(
+      "Steering delivery unconfirmed",
+    );
+    await expect(intervention).toContainText(
+      "Reopen the saved session to reconcile its transcript.",
+    );
+    // A resumed snapshot without queue/transcript evidence must not make the
+    // receipt disappear or claim delivery.
+    await page.locator("button.session-item.active").click();
+    await expect(page.locator("button.session-item.active")).not.toContainText(
+      "worker exited",
+    );
+    await expect(intervention).toHaveAttribute(
+      "data-intervention-status",
+      "unconfirmed",
+    );
+  } finally {
+    await launched.app.close().catch(() => undefined);
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("reopening a saved session reconciles or retains a lost intervention receipt", async () => {
+  const root = fs.mkdtempSync(
+    path.join(os.tmpdir(), "pi-deck-intervention-resume-"),
+  );
+  const launched = await launch(
+    interventionEnv(root, [
+      "--stream-delay-ms",
+      "5000",
+      "--exit-after-intervention-receipt",
+      "--persist-intervention-before-exit",
+    ]),
+  );
+  try {
+    const { page } = launched;
+    const composer = page.getByLabel("Prompt text");
+    await composer.fill("start resumable intervention fixture");
+    await page.getByRole("button", { name: "Send", exact: true }).click();
+    await expect(page.getByRole("button", { name: "Steer" })).toBeVisible();
+
+    const instruction = "Persist this receipt before transport loss";
+    await composer.fill(instruction);
+    await page.getByRole("button", { name: "Steer" }).click();
+    const intervention = page.locator('[data-intervention-kind="steer"]', {
+      hasText: instruction,
+    });
+    await expect(intervention).toHaveAttribute(
+      "data-intervention-status",
+      "unconfirmed",
+    );
+
+    // Selecting the detached row starts a fresh worker from the same saved
+    // file. Its durable user turn must replace—not duplicate—the receipt.
+    await page.locator("button.session-item.active").click();
+    await expect(intervention).toHaveAttribute(
+      "data-intervention-status",
+      "consumed",
+    );
+    await expect(
+      page.locator('[data-intervention-kind="steer"]', {
+        hasText: instruction,
+      }),
+    ).toHaveCount(1);
+    await expect(page.getByText(instruction, { exact: true })).toHaveCount(1);
+  } finally {
+    await launched.app.close().catch(() => undefined);
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("rejected steering and follow-up sends stay failed without failing the parent", async () => {
   const root = fs.mkdtempSync(
     path.join(os.tmpdir(), "pi-deck-intervention-failure-"),

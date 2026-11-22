@@ -39,7 +39,11 @@ export class PiRuntimeModelDiscoveryError extends Error {
     cause: unknown,
   ) {
     super(
-      `Pi runtime model discovery command(s) failed: ${failedCommands.join(", ")}${
+      `${
+        failedCommands.length > 0
+          ? `Pi runtime model discovery command(s) failed: ${failedCommands.join(", ")}`
+          : "Pi runtime model discovery returned no usable model inventory"
+      }${
         cause === undefined
           ? ""
           : ` (${cause instanceof Error ? cause.message : String(cause)})`
@@ -66,6 +70,45 @@ export class PiModelDiscoveryUnavailableError extends AggregateError {
       "Pi model discovery failed: runtime RPC returned no usable inventory or authoritative state, and --list-models failed.",
     );
   }
+}
+
+/**
+ * Discover model data from an already-running RPC worker. This is shared by
+ * the no-session bootstrap probe and active runtime refreshes so one failed
+ * sibling cannot discard successful state/default responses in either path.
+ */
+export async function discoverPiRuntimeModelResponses(
+  request: (command: RuntimeDiscoveryCommand) => Promise<unknown>,
+): Promise<ChatListModelsResult> {
+  const results = await Promise.allSettled(
+    RUNTIME_DISCOVERY_COMMANDS.map((command) => request(command)),
+  );
+  const values = results.map((result) =>
+    result.status === "fulfilled" ? result.value : undefined,
+  );
+  const partialResult = parsePiRuntimeModelDiscovery(
+    values[0],
+    values[1],
+    values[2],
+  );
+  const failedCommands = results.flatMap((result, index) =>
+    result.status === "rejected" ? [RUNTIME_DISCOVERY_COMMANDS[index]!] : [],
+  );
+  // An empty successful inventory is still partial discovery: state and
+  // thinking-level siblings remain useful, but callers must supplement the
+  // missing model catalog before treating discovery as complete.
+  if (failedCommands.length > 0 || partialResult.models.length === 0) {
+    const firstFailure = results.find(
+      (result): result is PromiseRejectedResult => result.status === "rejected",
+    );
+    throw new PiRuntimeModelDiscoveryError(
+      failedCommands,
+      partialResult,
+      firstFailure?.reason ??
+        new Error("Pi runtime returned no usable model inventory."),
+    );
+  }
+  return partialResult;
 }
 
 export async function discoverPiRuntimeModels(options: {
@@ -96,35 +139,11 @@ export async function discoverPiRuntimeModels(options: {
     // A failed inventory command must not discard a slower successful state
     // response. Every request remains bounded by PiWorker's existing request
     // timeout, while cancellation still closes the worker immediately.
-    const results = await Promise.allSettled([
-      worker.getState(),
-      worker.request("get_available_models"),
-      worker.request("get_available_thinking_levels"),
-    ]);
+    const discovery = await discoverPiRuntimeModelResponses((command) =>
+      command === "get_state" ? worker.getState() : worker.request(command),
+    );
     options.signal?.throwIfAborted();
-    const values = results.map((result) =>
-      result.status === "fulfilled" ? result.value : undefined,
-    );
-    const partialResult = parsePiRuntimeModelDiscovery(
-      values[0],
-      values[1],
-      values[2],
-    );
-    const failedCommands = results.flatMap((result, index) =>
-      result.status === "rejected" ? [RUNTIME_DISCOVERY_COMMANDS[index]!] : [],
-    );
-    if (failedCommands.length > 0) {
-      const firstFailure = results.find(
-        (result): result is PromiseRejectedResult =>
-          result.status === "rejected",
-      );
-      throw new PiRuntimeModelDiscoveryError(
-        failedCommands,
-        partialResult,
-        firstFailure?.reason,
-      );
-    }
-    return partialResult;
+    return discovery;
   } finally {
     // Keep ownership until OS-confirmed exit, including cancellation while an
     // RPC request is pending. Sending SIGTERM alone is not terminal evidence.
@@ -233,9 +252,20 @@ export async function recoverPiRuntimeModelDiscovery(
 
   try {
     const fallbackModels = await discoverFallbackModels();
-    return mergePiRuntimeDiscoveryWithModelFallback(
+    const recovered = mergePiRuntimeDiscoveryWithModelFallback(
       partialResult ?? { models: [], thinkingLevels: [] },
       fallbackModels,
+    );
+    if (
+      recovered.models.length > 0 ||
+      recovered.activeModel !== undefined ||
+      recovered.thinkingLevel !== undefined
+    ) {
+      return recovered;
+    }
+    throw new PiModelDiscoveryUnavailableError(
+      runtimeFailure,
+      new Error("Pi --list-models returned no usable model inventory."),
     );
   } catch (fallbackFailure) {
     if (
@@ -244,6 +274,9 @@ export async function recoverPiRuntimeModelDiscovery(
         partialResult.thinkingLevel !== undefined)
     ) {
       return partialResult;
+    }
+    if (fallbackFailure instanceof PiModelDiscoveryUnavailableError) {
+      throw fallbackFailure;
     }
     throw new PiModelDiscoveryUnavailableError(runtimeFailure, fallbackFailure);
   }

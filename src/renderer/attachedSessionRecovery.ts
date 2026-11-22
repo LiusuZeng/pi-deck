@@ -4,6 +4,10 @@ import type {
   ChatSnapshot,
 } from "../shared/types.js";
 import type { SessionViewModel } from "./sessionRuntimeReducer.js";
+import {
+  matchDurableInterventionMessages,
+  type DurableUserMessageEvidence,
+} from "./interventions.js";
 
 export const ATTACHED_SESSION_RECOVERY_TIMEOUT_MS = 10_000;
 
@@ -81,6 +85,62 @@ function isSavedPreview(item: SessionViewModel["timeline"][number]): boolean {
   );
 }
 
+/**
+ * Replace durable snapshot user rows with their optimistic intervention
+ * receipts before ID-based timeline merging. Pi assigns its own message ID,
+ * so merging first would retain both rows and lose the recovery outcome.
+ */
+export function reconcileRecoveredInterventionTimeline(
+  recovered: SessionViewModel["timeline"],
+  current: SessionViewModel["timeline"],
+): {
+  recovered: SessionViewModel["timeline"];
+  current: SessionViewModel["timeline"];
+} {
+  const durableUsers: DurableUserMessageEvidence[] = recovered.flatMap(
+    (item) =>
+      item.kind === "user"
+        ? [
+            {
+              id: item.id,
+              content: item.content,
+              createdAt: item.createdAt,
+              ...(item.attachments === undefined
+                ? {}
+                : { attachments: item.attachments }),
+            },
+          ]
+        : [],
+  );
+  const localTimeline = current.flatMap((item) =>
+    item.kind === "user" || item.kind === "intervention" ? [item] : [],
+  );
+  const matched = matchDurableInterventionMessages({
+    localTimeline,
+    durableUsers,
+  });
+  const consumedById = new Map(
+    matched.interventions
+      .filter((item) => item.status === "consumed" && item.durableMessageId)
+      .map((item) => [item.id, item] as const),
+  );
+  const consumedByDurableId = new Map(
+    [...consumedById.values()].map(
+      (item) => [item.durableMessageId!, item] as const,
+    ),
+  );
+  const replaceLocal = (timeline: SessionViewModel["timeline"]) =>
+    timeline.map((item) =>
+      item.kind === "intervention" ? (consumedById.get(item.id) ?? item) : item,
+    );
+  return {
+    recovered: recovered.map((item) =>
+      item.kind === "user" ? (consumedByDurableId.get(item.id) ?? item) : item,
+    ),
+    current: replaceLocal(current),
+  };
+}
+
 function mergeRecoveryTimeline(
   recovered: SessionViewModel["timeline"],
   current: SessionViewModel["timeline"],
@@ -139,6 +199,10 @@ export function mergeRecoveredAttachedSession(
 ): SessionViewModel {
   const pendingInteraction =
     (current.pendingExtensionUiRequests?.length ?? 0) > 0;
+  const reconciledTimeline = reconcileRecoveredInterventionTimeline(
+    recovered.timeline,
+    current.timeline,
+  );
   const merged: SessionViewModel = {
     ...recovered,
     workspaceId: current.workspaceId,
@@ -149,8 +213,8 @@ export function mergeRecoveredAttachedSession(
           titleOverride: current.titleOverride,
         }),
     timeline: mergeRecoveryTimeline(
-      recovered.timeline,
-      current.timeline,
+      reconciledTimeline.recovered,
+      reconciledTimeline.current,
       runtimeEventObserved,
     ),
   };

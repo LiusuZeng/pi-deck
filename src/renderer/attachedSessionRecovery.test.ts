@@ -183,6 +183,65 @@ describe("mergeRecoveredAttachedSession", () => {
     });
   });
 
+  it("reconciles a retained unconfirmed receipt with a durable snapshot turn", () => {
+    const recovered = session("runtime-1", {
+      timeline: [
+        {
+          id: "pi-user-1",
+          kind: "user",
+          content: "Focus the tests",
+          createdAt: "10:01",
+        },
+      ],
+    });
+    const current = session("runtime-1", {
+      timeline: [
+        {
+          id: "local-steer-1",
+          kind: "intervention",
+          interventionKind: "steer",
+          status: "unconfirmed",
+          content: "Focus the tests",
+          createdAt: "10:00",
+          failureMessage: "Pi disconnected before delivery could be confirmed.",
+        },
+      ],
+    });
+
+    const merged = mergeRecoveredAttachedSession(recovered, current, false);
+    expect(merged.timeline).toEqual([
+      expect.objectContaining({
+        id: "local-steer-1",
+        kind: "intervention",
+        status: "consumed",
+        durableMessageId: "pi-user-1",
+      }),
+    ]);
+    expect(merged.timeline[0]).not.toHaveProperty("failureMessage");
+  });
+
+  it("retains an unconfirmed receipt when a resumed snapshot has no evidence", () => {
+    const current = session("runtime-1", {
+      timeline: [
+        {
+          id: "local-steer-1",
+          kind: "intervention",
+          interventionKind: "steer",
+          status: "unconfirmed",
+          content: "Focus the tests",
+          createdAt: "10:00",
+        },
+      ],
+    });
+
+    expect(
+      mergeRecoveredAttachedSession(session("runtime-1"), current, false)
+        .timeline,
+    ).toEqual([
+      expect.objectContaining({ id: "local-steer-1", status: "unconfirmed" }),
+    ]);
+  });
+
   it("replays meaningful terminal events over deferred recovery and ignores a no-op", () => {
     const current = session("runtime-1", {
       status: "working",
