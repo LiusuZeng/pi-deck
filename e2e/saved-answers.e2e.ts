@@ -364,15 +364,23 @@ test("a completed answer can be saved and reopened after app restart", async () 
     await expect(revisionDialog).toBeVisible();
     await revisionDialog.getByRole("button", { name: "Save revision" }).click();
     await expect(second.page.getByText("Revision 3 of 3")).toBeVisible();
-    await second.page.getByRole("button", { name: /Revision 2/ }).click();
+    await second.page.getByRole("button", { name: /^Revision 2\b/ }).click();
     const outputDetail = second.page.getByLabel("Output detail", {
       exact: true,
     });
+    const review = outputDetail.getByLabel("Review this revision", {
+      exact: true,
+    });
     await expect(
-      outputDetail
-        .locator(".output-review-history")
-        .getByText("Add an incident-owner checklist.", { exact: true }),
+      review.getByRole("heading", { name: "Review revision 2", exact: true }),
     ).toBeVisible();
+    const incidentOwnerFeedback = review
+      .getByRole("listitem")
+      .filter({ hasText: "Add an incident-owner checklist." });
+    await expect(incidentOwnerFeedback).toHaveCount(1);
+    await expect(incidentOwnerFeedback).toContainText(
+      "Add an incident-owner checklist.",
+    );
     const outputs = await openOutputs(second.page);
     await expect(
       outputs.getByRole("heading", { name: "Outputs", exact: true }),
