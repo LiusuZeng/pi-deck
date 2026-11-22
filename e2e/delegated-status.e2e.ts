@@ -93,22 +93,31 @@ test("delegated status separates child outcomes from each parent phase", async (
     await page.evaluate(() => {
       const target = document.body;
       const windowWithCapture = window as typeof window & {
-        __delegatedStatusSnapshots?: string[];
+        __delegatedStatusSnapshots?: {
+          all: string[];
+          primary: string[];
+        };
         __delegatedStatusObserver?: MutationObserver;
       };
-      windowWithCapture.__delegatedStatusSnapshots = [];
+      windowWithCapture.__delegatedStatusSnapshots = { all: [], primary: [] };
       windowWithCapture.__delegatedStatusObserver?.disconnect();
       const capture = (): void => {
-        const text = Array.from(
+        const cards = Array.from(
           document.querySelectorAll(".agent-activity-tool-card"),
-        )
+        );
+        const text = cards
           .map((card) => card.textContent?.replace(/\s+/g, " ").trim() ?? "")
           .join(" || ");
-        if (
-          text &&
-          windowWithCapture.__delegatedStatusSnapshots?.at(-1) !== text
-        ) {
-          windowWithCapture.__delegatedStatusSnapshots?.push(text);
+        const primary = cards.find((card) =>
+          card
+            .querySelector(".subagent-activity-heading")
+            ?.textContent?.includes("3 tasks"),
+        );
+        const primaryText = primary?.textContent?.replace(/\s+/g, " ").trim();
+        const snapshots = windowWithCapture.__delegatedStatusSnapshots;
+        if (text && snapshots?.all.at(-1) !== text) snapshots?.all.push(text);
+        if (primaryText && snapshots?.primary.at(-1) !== primaryText) {
+          snapshots?.primary.push(primaryText);
         }
       };
       const observer = new MutationObserver(capture);
@@ -130,37 +139,50 @@ test("delegated status separates child outcomes from each parent phase", async (
       .poll(
         () =>
           page.evaluate(() => {
-            const snapshots =
-              (
-                window as typeof window & {
-                  __delegatedStatusSnapshots?: string[];
-                }
-              ).__delegatedStatusSnapshots ?? [];
-            return [
-              "Running delegated tasks",
-              "Processing delegated results",
-              "Synthesizing results",
-              "Completed delegated work",
-              "Delegated work failed",
-            ].every((text) =>
-              snapshots.some((snapshot) => snapshot.includes(text)),
+            const snapshots = (
+              window as typeof window & {
+                __delegatedStatusSnapshots?: {
+                  all: string[];
+                  primary: string[];
+                };
+              }
+            ).__delegatedStatusSnapshots ?? { all: [], primary: [] };
+            return (
+              [
+                "Running delegated tasks",
+                "Processing delegated results",
+                "Synthesizing results",
+                "Completed delegated work",
+              ].every((text) =>
+                snapshots.primary.some((snapshot) => snapshot.includes(text)),
+              ) &&
+              snapshots.all.some((snapshot) =>
+                snapshot.includes("Delegated work failed"),
+              )
             );
           }),
         { timeout: 15_000 },
       )
       .toBe(true);
 
-    // Read back once after poll completion so ordering and independent cards
-    // are checked against one deterministic capture history.
-    const captured = await page.evaluate(() =>
-      (
-        window as typeof window & { __delegatedStatusSnapshots?: string[] }
-      ).__delegatedStatusSnapshots?.slice(),
+    // The two cards overlap intentionally. Check the primary lifecycle on
+    // its own card; the aggregate history is only for concurrent-card checks.
+    const captured = await page.evaluate(
+      () =>
+        (
+          window as typeof window & {
+            __delegatedStatusSnapshots?: {
+              all: string[];
+              primary: string[];
+            };
+          }
+        ).__delegatedStatusSnapshots,
     );
     expect(captured).toBeDefined();
-    const snapshots = captured ?? [];
+    const allSnapshots = captured?.all ?? [];
+    const primarySnapshots = captured?.primary ?? [];
     const indexOf = (text: string): number =>
-      snapshots.findIndex((snapshot) => snapshot.includes(text));
+      primarySnapshots.findIndex((snapshot) => snapshot.includes(text));
     expect(indexOf("Running delegated tasks")).toBeGreaterThanOrEqual(0);
     expect(indexOf("Processing delegated results")).toBeGreaterThan(
       indexOf("Running delegated tasks"),
@@ -172,15 +194,15 @@ test("delegated status separates child outcomes from each parent phase", async (
       indexOf("Synthesizing results"),
     );
 
-    expect(snapshots.join("\n")).toContain(
+    expect(primarySnapshots.join("\n")).toContain(
       "3 delegated tasks finished · 2 succeeded · 1 failed",
     );
-    expect(snapshots.join("\n")).toContain(
+    expect(allSnapshots.join("\n")).toContain(
       "1 delegated task finished · 1 failed",
     );
-    expect(snapshots.join("\n")).not.toContain("3/3 done");
+    expect(allSnapshots.join("\n")).not.toContain("3/3 done");
     expect(
-      snapshots.some(
+      allSnapshots.some(
         (snapshot) =>
           snapshot.includes("Completed delegated work") &&
           snapshot.includes("Running delegated tasks") &&
