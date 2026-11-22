@@ -21,7 +21,7 @@ async function openOutputs(page: Page) {
     .getByRole("button", { name: "Outputs", exact: true });
   await expect(outputsButton).toHaveCount(1);
   await outputsButton.click();
-  const outputs = page.getByLabel("Outputs", { exact: true });
+  const outputs = page.locator('section.outputs-library[aria-label="Outputs"]');
   await expect(outputs).toHaveCount(1);
   await expect(outputs).toBeVisible();
   return outputs;
