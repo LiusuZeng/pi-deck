@@ -15,6 +15,18 @@ function canonicalSessionFile(sessionFile: string | undefined): string {
   return fs.realpathSync(sessionFile);
 }
 
+async function openOutputs(page: Page) {
+  const outputsButton = page
+    .getByLabel("Sessions", { exact: true })
+    .getByRole("button", { name: "Outputs", exact: true });
+  await expect(outputsButton).toHaveCount(1);
+  await outputsButton.click();
+  const outputs = page.getByLabel("Outputs", { exact: true });
+  await expect(outputs).toHaveCount(1);
+  await expect(outputs).toBeVisible();
+  return outputs;
+}
+
 function createFakePiBinary(root: string): string {
   const fakePiPath = path.join(root, "fake-pi.js");
   fs.writeFileSync(
@@ -353,23 +365,34 @@ test("a completed answer can be saved and reopened after app restart", async () 
     await revisionDialog.getByRole("button", { name: "Save revision" }).click();
     await expect(second.page.getByText("Revision 3 of 3")).toBeVisible();
     await second.page.getByRole("button", { name: /Revision 2/ }).click();
+    const outputDetail = second.page.getByLabel("Output detail", {
+      exact: true,
+    });
     await expect(
-      second.page.getByText("Add an incident-owner checklist."),
+      outputDetail
+        .locator(".output-review-history")
+        .getByText("Add an incident-owner checklist.", { exact: true }),
     ).toBeVisible();
-    await second.page.getByRole("button", { name: "Outputs" }).click();
+    const outputs = await openOutputs(second.page);
     await expect(
-      second.page.getByRole("heading", { name: "Outputs" }),
+      outputs.getByRole("heading", { name: "Outputs", exact: true }),
     ).toBeVisible();
-    await second.page.getByLabel("Search outputs").fill("rollback concrete");
-    await second.page.getByRole("button", { name: "Search" }).click();
-    await second.page.getByRole("button", { name: /Kept answer/ }).click();
+    await outputs.getByLabel("Search outputs").fill("rollback concrete");
+    await outputs.getByRole("button", { name: "Search", exact: true }).click();
+    const matchingOutput = outputs.getByRole("button", {
+      name: /^Kept answer\b/,
+    });
+    await expect(matchingOutput).toHaveCount(1);
+    await matchingOutput.click();
     await expect(
-      second.page.getByRole("heading", { name: "Kept answer" }),
+      outputDetail.getByRole("heading", { name: "Kept answer", exact: true }),
     ).toBeVisible();
-    await expect(second.page.locator(".saved-answer-content")).toContainText(
+    await expect(outputDetail.locator(".saved-answer-content")).toContainText(
       "Add a rollback section with concrete steps.",
     );
-    await expect(second.page.getByText("Revision 3 of 3")).toBeVisible();
+    await expect(
+      outputDetail.getByText("Revision 3 of 3", { exact: true }),
+    ).toBeVisible();
     const savedIdentity = await second.page.evaluate(async () => {
       const workspace = await window.piDeck.workspaces.getActive();
       if (workspace.activeWorkspace === undefined) {
@@ -399,10 +422,12 @@ test("a completed answer can be saved and reopened after app restart", async () 
       "externally changed",
     );
     third = await launch(env);
-    await third.page.getByRole("button", { name: "Outputs" }).click();
-    await expect(third.page.getByText(/could not be verified/)).toBeVisible();
+    const integrityOutputs = await openOutputs(third.page);
     await expect(
-      third.page.getByRole("button", { name: /Kept answer/ }),
+      integrityOutputs.getByText(/could not be verified/),
+    ).toBeVisible();
+    await expect(
+      integrityOutputs.getByRole("button", { name: /^Kept answer\b/ }),
     ).toHaveCount(0);
   } finally {
     await first?.app.close().catch(() => undefined);
