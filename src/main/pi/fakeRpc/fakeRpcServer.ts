@@ -48,6 +48,8 @@ interface FakeOptions {
   streamDelayMs: number;
   /** Delay prompt command success after the user turn is already recorded. */
   promptResponseDelayMs: number;
+  /** Hold one accepted prompt response until a test-controlled release file. */
+  promptResponseBarrierDir?: string;
   ignoredCommands: Set<string>;
   failedCommands: Set<string>;
   promptScenario: PromptScenario;
@@ -294,6 +296,10 @@ function parseOptions(argv: string[]): FakeOptions {
       index += 1;
     } else if (arg === "--delay-prompt-response-ms") {
       options.promptResponseDelayMs = Number(argv[index + 1] ?? "0");
+      index += 1;
+    } else if (arg === "--prompt-response-barrier-dir") {
+      const barrierDir = argv[index + 1];
+      if (barrierDir) options.promptResponseBarrierDir = barrierDir;
       index += 1;
     } else if (arg === "--ignore-command") {
       options.ignoredCommands.add(argv[index + 1] ?? "");
@@ -694,6 +700,8 @@ class FakeRpcServer {
   private currentTimers: NodeJS.Timeout[] = [];
   private forkStateBarrierStarted = false;
   private forkStateBarrierTimer: NodeJS.Timeout | undefined;
+  private promptResponseBarrierUsed = false;
+  private promptResponseBarrierWatcher: fs.FSWatcher | undefined;
   private agentActive = false;
   private currentModel = this.options.collidingModels
     ? "claude-opus-4-5"
@@ -831,6 +839,7 @@ class FakeRpcServer {
       }
     };
     process.once("exit", recordForkExit);
+    process.once("exit", () => this.cancelPromptResponseBarrier());
     // Node's default SIGTERM termination does not reliably run userland exit
     // listeners through every Electron-spawned wrapper. Test barriers can
     // prove mutation occurred after close requested exit but before worker_exit.
@@ -858,6 +867,7 @@ class FakeRpcServer {
             // Test diagnostics must never prevent worker shutdown.
           }
         }
+        this.cancelPromptResponseBarrier();
         for (const timer of this.currentTimers) clearTimeout(timer);
         this.currentTimers = [];
         this.agentActive = false;
@@ -3097,6 +3107,14 @@ class FakeRpcServer {
   }
 
   private respondPrompt(id: string | undefined): void {
+    if (
+      this.options.promptResponseBarrierDir !== undefined &&
+      !this.promptResponseBarrierUsed
+    ) {
+      this.promptResponseBarrierUsed = true;
+      this.holdPromptResponseAtBarrier(id);
+      return;
+    }
     if (this.options.promptResponseDelayMs > 0) {
       const timer = setTimeout(() => {
         this.currentTimers = this.currentTimers.filter(
@@ -3108,6 +3126,38 @@ class FakeRpcServer {
       return;
     }
     this.respond(id, "prompt");
+  }
+
+  private holdPromptResponseAtBarrier(id: string | undefined): void {
+    const barrierDir = this.options.promptResponseBarrierDir!;
+    fs.mkdirSync(barrierDir, { recursive: true });
+    fs.writeFileSync(path.join(barrierDir, "prompt-response-held"), "held\n");
+    const releaseFile = path.join(barrierDir, "release-prompt-response");
+    let released = false;
+    const release = (): void => {
+      if (released || !fs.existsSync(releaseFile)) return;
+      released = true;
+      watcher.close();
+      if (this.promptResponseBarrierWatcher === watcher) {
+        this.promptResponseBarrierWatcher = undefined;
+      }
+      this.respond(id, "prompt");
+    };
+    const watcher = fs.watch(barrierDir, release);
+    this.promptResponseBarrierWatcher = watcher;
+    watcher.once("error", () => this.cancelPromptResponseBarrier());
+    // Close the subscribe/check race if the test released before watch started.
+    release();
+  }
+
+  private cancelPromptResponseBarrier(): void {
+    const watcher = this.promptResponseBarrierWatcher;
+    this.promptResponseBarrierWatcher = undefined;
+    try {
+      watcher?.close();
+    } catch {
+      // Test-only watcher cleanup must never impede fake-worker shutdown.
+    }
   }
 
   private respond(
