@@ -467,6 +467,92 @@ describe("Pi Deck Electron runtime", () => {
     }
   });
 
+  it("does not let a stale reclaimer retire a live independent preparer", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "pi-deck-electron-"));
+    try {
+      const runtimeCacheRoot = path.join(root, "cache");
+      const { executable } = await writeFakeElectronBundle(
+        path.join(root, "source"),
+      );
+      const crashedPreparer = startRuntimePreparationChild({
+        copyMode: "exit",
+        electronExecutable: executable,
+        runtimeCacheRoot,
+      });
+      await crashedPreparer.waitFor("copy-started");
+      await expect(crashedPreparer.waitForExit()).resolves.toBe(0);
+
+      const delayedReclaimer = startRuntimePreparationChild({
+        copyMode: "hold",
+        electronExecutable: executable,
+        holdLockReclaim: true,
+        runtimeCacheRoot,
+      });
+      await delayedReclaimer.waitFor("lock-reclaiming");
+
+      const contender = startRuntimePreparationChild({
+        copyMode: "fail",
+        electronExecutable: executable,
+        runtimeCacheRoot,
+        waitForLock: true,
+      });
+      await contender.waitFor("lock-waiting");
+
+      delayedReclaimer.child.send("continue-lock-reclaim");
+      await delayedReclaimer.waitFor("copy-started");
+      delayedReclaimer.child.send("continue-copy");
+      const prepared = await delayedReclaimer.completed;
+
+      contender.child.send("continue-lock-wait");
+      const reused = await contender.completed;
+      expect(reused.executable).toBe(prepared.executable);
+      await expect(access(prepared.executable)).resolves.toBeUndefined();
+      await expect(
+        access(
+          runtimeIdentityMarkerPath(findMacOSAppBundle(prepared.executable)),
+        ),
+      ).resolves.toBeUndefined();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps a successful caller's executable when a later preparer fails", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "pi-deck-electron-"));
+    try {
+      const runtimeCacheRoot = path.join(root, "cache");
+      const { executable } = await writeFakeElectronBundle(
+        path.join(root, "source"),
+      );
+      const successfulPreparer = startRuntimePreparationChild({
+        copyMode: "default",
+        electronExecutable: executable,
+        runtimeCacheRoot,
+      });
+      const successful = await successfulPreparer.completed;
+      await writeFile(executable, "fake-electron-updated");
+      await chmod(executable, 0o755);
+
+      const failingPreparer = startRuntimePreparationChild({
+        copyMode: "default",
+        electronExecutable: executable,
+        failAfterRuntimePublication: true,
+        runtimeCacheRoot,
+      });
+      await failingPreparer.waitFor("runtime-published");
+      await expect(failingPreparer.completed).rejects.toThrow(
+        "post-publication failure",
+      );
+
+      await expect(access(successful.executable)).resolves.toBeUndefined();
+      await expect(readFile(successful.executable, "utf8")).resolves.toBe(
+        "fake-electron",
+      );
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("publishes complete lock ownership before a concurrent contender can observe it", async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "pi-deck-electron-"));
     try {
