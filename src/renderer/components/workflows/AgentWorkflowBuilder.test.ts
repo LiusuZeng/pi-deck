@@ -80,6 +80,22 @@ describe("AgentWorkflowBuilder UUID identities", () => {
     ).toBeDefined();
   });
 
+  it("does not offer unsupported timeout seconds and rejects imported limits", () => {
+    render();
+    expect(container!.textContent).not.toContain("Timeout seconds");
+    expect(container!.textContent).toContain("Max attempts");
+
+    const definition = defaultAgentWorkflowDefinition();
+    definition.nodes[0] = {
+      ...definition.nodes[0]!,
+      execution: { timeoutSeconds: 60 },
+    } as never;
+    expect(validateJsonDraft(JSON.stringify(definition))).toMatchObject({
+      error:
+        "/nodes/0/execution/timeoutSeconds: Timeout seconds is not supported. Remove timeoutSeconds before saving or importing this workflow.",
+    });
+  });
+
   it("generates UUID node IDs for added roles and their references", () => {
     const withOrchestrator = addRole(
       defaultAgentWorkflowDefinition(),
