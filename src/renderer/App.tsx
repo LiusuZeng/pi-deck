@@ -7273,7 +7273,7 @@ export function App(): ReactElement {
       ...current,
       [next.id]: {
         outputId: detail.outputId,
-        expectedRevisionId: detail.revisionId,
+        expectedRevisionId: detail.currentRevisionId,
         title: detail.title,
         displayNumber: detail.selectedDisplayNumber,
       },

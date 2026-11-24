@@ -153,10 +153,41 @@ test("a completed answer can be saved and reopened after app restart", async () 
     await expect(revisionDialog).toBeVisible();
     await revisionDialog.getByRole("button", { name: "Save revision" }).click();
     await expect(first.page.getByText("Revision 2 of 2")).toBeVisible();
+    await first.page.evaluate(async () => {
+      const snapshot = await window.piDeck.chat.getSnapshot();
+      await window.piDeck.chat.closeSession({ runtimeId: snapshot.runtimeId });
+    });
     await first.page.getByRole("button", { name: /Revision 1/ }).click();
     await expect(
       first.page.getByText("Add a rollback section with concrete steps."),
     ).toBeVisible();
+    await first.page
+      .getByRole("button", { name: "Revise in new session" })
+      .click();
+    await expect(
+      first.page.getByText(/Revising Kept answer, revision 1/),
+    ).toBeVisible();
+    await expect(first.page.getByLabel("Prompt text")).toHaveValue(
+      /Fake response to: Answer worth keeping/,
+    );
+    await expect(first.page.getByLabel("Prompt text")).toHaveValue(
+      /Add a rollback section with concrete steps/,
+    );
+    await first.page.getByRole("button", { name: "Send" }).click();
+    const historicalRevisionRow = first.page
+      .locator("article.assistant-row")
+      .last();
+    await historicalRevisionRow
+      .getByRole("button", { name: "Save as output" })
+      .click();
+    await expect(
+      first.page.getByRole("dialog", { name: "Save as next revision" }),
+    ).toBeVisible();
+    await first.page
+      .getByRole("dialog", { name: "Save as next revision" })
+      .getByRole("button", { name: "Save revision" })
+      .click();
+    await expect(first.page.getByText("Revision 3 of 3")).toBeVisible();
     await first.app.close();
     first = undefined;
 
@@ -174,7 +205,7 @@ test("a completed answer can be saved and reopened after app restart", async () 
     await expect(second.page.locator(".saved-answer-content")).toContainText(
       "Add a rollback section with concrete steps.",
     );
-    await expect(second.page.getByText("Revision 2 of 2")).toBeVisible();
+    await expect(second.page.getByText("Revision 3 of 3")).toBeVisible();
     const savedIdentity = await second.page.evaluate(async () => {
       const workspace = await window.piDeck.workspaces.getActive();
       if (workspace.activeWorkspace === undefined) {
