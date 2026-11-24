@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn, type ChildProcess } from "node:child_process";
 import { EventEmitter } from "node:events";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -47,6 +47,29 @@ function waitForEvent(
       client.off("event", listener);
     };
     client.on("event", listener);
+  });
+}
+
+function waitForDiagnostic(
+  client: JsonlRpcClient,
+  predicate: (message: string) => boolean,
+  timeoutMs = 5_000,
+): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      cleanup();
+      reject(new Error("Timed out waiting for RPC diagnostic"));
+    }, timeoutMs);
+    const listener = (message: string): void => {
+      if (!predicate(message)) return;
+      cleanup();
+      resolve(message);
+    };
+    const cleanup = (): void => {
+      clearTimeout(timer);
+      client.off("diagnostic", listener);
+    };
+    client.on("diagnostic", listener);
   });
 }
 
@@ -700,9 +723,10 @@ test("fake RPC can record a prompt and disconnect before responding", async () =
 });
 
 test("fake RPC can record a prompt and delay its success response past the client timeout", async () => {
-  const client = spawnFake(["--delay-prompt-response-ms", "50"]);
-  const diagnostics: string[] = [];
-  client.on("diagnostic", (message: string) => diagnostics.push(message));
+  const barrierDir = mkdtempSync(
+    path.join(tmpdir(), "pi-deck-prompt-response-barrier-"),
+  );
+  const client = spawnFake(["--prompt-response-barrier-dir", barrierDir]);
   try {
     const started = waitForEvent(
       client,
@@ -716,11 +740,19 @@ test("fake RPC can record a prompt and delay its success response past the clien
         return true;
       },
     );
+    assert.equal(client.pendingCount, 0);
     await started;
-    await new Promise((resolve) => setTimeout(resolve, 80));
-    assert.match(diagnostics.join("\n"), /unknown RPC id/);
+    assert.ok(existsSync(path.join(barrierDir, "prompt-response-held")));
+    // Subscribe before releasing the held response: it arrives after its
+    // request timed out and must therefore be reported as unknown.
+    const lateResponse = waitForDiagnostic(client, (message) =>
+      /unknown RPC id/.test(message),
+    );
+    writeFileSync(path.join(barrierDir, "release-prompt-response"), "");
+    assert.match(await lateResponse, /unknown RPC id/);
   } finally {
     client.close();
+    rmSync(barrierDir, { recursive: true, force: true });
   }
 });
 

@@ -44,6 +44,7 @@ function detail(
     size: 24,
     origin: "manual-save",
     content: `Content for ${outputId} revision ${selectedDisplayNumber}`,
+    currentRevisionId: "revision-2",
     selectedRevisionId,
     selectedDisplayNumber,
     revisions: [
