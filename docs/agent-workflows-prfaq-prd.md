@@ -1,6 +1,6 @@
 # Agent Workflows: reusable processes — PR/FAQ and PRD
 
-**Status:** Proposed feature direction; not a shipped-feature announcement or release-date commitment.
+**Status:** **UNAPPROVED** feature proposal; not a shipped-feature announcement, approved implementation plan, or release-date commitment.
 
 ## In a few sentences
 

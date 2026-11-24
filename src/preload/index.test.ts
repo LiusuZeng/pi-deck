@@ -263,6 +263,38 @@ describe("preload PiDeck API validation", () => {
     });
   });
 
+  it("returns unknown intervention delivery status for context-bridge-safe renderer handling", async () => {
+    electronMock.ipcRenderer.invoke.mockResolvedValue({
+      ok: false,
+      error: {
+        code: "INTERNAL_ERROR",
+        message: "RPC command timed out before response: steer",
+        deliveryStatus: "unknown",
+      },
+    });
+
+    await expect(
+      api.chat.steer({ runtimeId: "runtime-1", text: "Change course once" }),
+    ).resolves.toEqual({
+      deliveryStatus: "unknown",
+      message: "RPC command timed out before response: steer",
+    });
+    electronMock.ipcRenderer.invoke.mockResolvedValue({
+      ok: false,
+      error: {
+        code: "INTERNAL_ERROR",
+        message: "RPC command timed out before response: follow_up",
+        deliveryStatus: "unknown",
+      },
+    });
+    await expect(
+      api.chat.followUp({ runtimeId: "runtime-1", text: "Follow up once" }),
+    ).resolves.toEqual({
+      deliveryStatus: "unknown",
+      message: "RPC command timed out before response: follow_up",
+    });
+  });
+
   it("exposes strict steer and follow-up IPC methods", async () => {
     electronMock.ipcRenderer.invoke.mockResolvedValue({
       ok: true,

@@ -906,6 +906,7 @@ export const savedAnswerReviewEventSchema = z
 export const savedAnswerDetailSchema = savedAnswerSummarySchema
   .extend({
     content: z.string().max(2 * 1024 * 1024),
+    currentRevisionId: savedAnswerIdSchema,
     selectedRevisionId: savedAnswerIdSchema,
     selectedDisplayNumber: z.number().int().positive(),
     revisions: z.array(savedAnswerRevisionSummarySchema),

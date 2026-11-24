@@ -1,6 +1,6 @@
 # Agent Workflows — Feature Roadmap
 
-**Status:** Product proposal for discussion; not an approved implementation plan or release commitment.
+**Status:** **UNAPPROVED** product proposal for discussion; not an approved implementation plan or release commitment.
 **Relationship to earlier proposal:** The [issue-delivery roadmap](agent-workflows-issue-delivery-roadmap.md) is a possible validation scenario. It is not the roadmap for the whole feature. This document supplies that broader product direction.
 
 ## 1. Product thesis

@@ -1,6 +1,6 @@
 # Agent Workflows: from prompt graphs to repeatable issue delivery
 
-**Status:** Proposal for discussion, not an approved product contract or implementation claim.
+**Status:** **UNAPPROVED** proposal for discussion, not an approved product contract or implementation claim.
 **Scope:** Make developing pi-deck with pi-deck a first-class workflow use case. This is a use-case exploration, not the feature-wide roadmap; see [Agent Workflows — Feature Roadmap](agent-workflows-feature-roadmap.md) for the broader product direction.
 **Evidence:** Current repository implementation, canonical workflow design, and open GitHub issues inspected during this review. Issue state may change.
 
