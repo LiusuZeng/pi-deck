@@ -1255,7 +1255,7 @@ function registerIpcHandlers(
             text,
             promptAttachments,
             attachmentOwnerId,
-          );
+          ).catch(coercePreDispatchPromptError);
           assertChatRuntimeSessionNotMutating(activeRuntimeId, "steering it");
           await adapter.steer(activeRuntimeId, input);
         },
@@ -1300,7 +1300,7 @@ function registerIpcHandlers(
                 text,
                 promptAttachments,
                 attachmentOwnerId,
-              ),
+              ).catch(coercePreDispatchPromptError),
             );
           }),
       });

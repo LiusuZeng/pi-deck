@@ -85,6 +85,7 @@ import {
   interventionAccessibleLabel,
   interventionStatusLabel,
   interventionTypeLabel,
+  markInterventionDeliveryUnconfirmed,
   markInterventionFailed,
   markInterventionQueued,
 } from "./interventions.js";
@@ -5351,10 +5352,18 @@ export function App(): ReactElement {
         })),
         ...(attachmentOwnerId !== undefined ? { attachmentOwnerId } : {}),
       };
-      if (kind === "steer") {
-        await window.piDeck.chat.steer(request);
-      } else {
-        await window.piDeck.chat.followUp(request);
+      const delivery =
+        kind === "steer"
+          ? await window.piDeck.chat.steer(request)
+          : await window.piDeck.chat.followUp(request);
+      if (delivery?.deliveryStatus === "unknown") {
+        // Preload returns this bridge-safe result rather than relying on an
+        // Error property that Electron contextBridge would discard.
+        const error = new Error(delivery.message) as Error & {
+          deliveryStatus: "unknown";
+        };
+        error.deliveryStatus = "unknown";
+        throw error;
       }
       setSessions((current) =>
         updateSessionByRuntimeId(current, selectedSession.id, (session) => ({
@@ -5380,13 +5389,20 @@ export function App(): ReactElement {
       );
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      setComposerError(message);
-      const restored = restoreRejectedComposerDraft(
-        selectedSession.id,
-        text,
-        queuedAttachments,
-        submissionRevision,
+      const deliveryUnconfirmed = isPromptDeliveryUnconfirmedError(error);
+      setComposerError(
+        deliveryUnconfirmed
+          ? "Pi may have received this instruction. Check session history before recovering or retrying; retrying may duplicate work."
+          : message,
       );
+      const restored = deliveryUnconfirmed
+        ? false
+        : restoreRejectedComposerDraft(
+            selectedSession.id,
+            text,
+            queuedAttachments,
+            submissionRevision,
+          );
       unblockAttachmentOwner(selectedSession.id);
       if (!restored) {
         const ownerId = attachmentOwnersBySession.current.get(
@@ -5404,11 +5420,16 @@ export function App(): ReactElement {
         }
       }
       reportComposerDraftPersistenceResult(
-        composerDraftPersistenceRef.current!.finishSubmission(
-          selectedSession,
-          "rejected",
-          restored,
-        ),
+        deliveryUnconfirmed
+          ? composerDraftPersistenceRef.current!.reconcilePendingSubmission(
+              selectedSession,
+              "unknown",
+            )
+          : composerDraftPersistenceRef.current!.finishSubmission(
+              selectedSession,
+              "rejected",
+              restored,
+            ),
       );
       publishPendingComposerRecovery(selectedSession);
       setSessions((current) =>
@@ -5418,13 +5439,17 @@ export function App(): ReactElement {
               ...session,
               timeline: session.timeline.map((item) =>
                 item.kind === "intervention" && item.id === interventionId
-                  ? markInterventionFailed(item, message)
+                  ? deliveryUnconfirmed
+                    ? markInterventionDeliveryUnconfirmed(item, message)
+                    : markInterventionFailed(item, message)
                   : item,
               ),
             },
             {
               tone: "error",
-              content: `${kind === "steer" ? "Steer" : "Follow-up"} failed: ${message}`,
+              content: deliveryUnconfirmed
+                ? `${kind === "steer" ? "Steering" : "Follow-up"} delivery unconfirmed: Pi may have received this instruction. Check session history before recovering or retrying; retrying may duplicate work. Details: ${message}`
+                : `${kind === "steer" ? "Steer" : "Follow-up"} failed: ${message}`,
             },
           ),
         ),
