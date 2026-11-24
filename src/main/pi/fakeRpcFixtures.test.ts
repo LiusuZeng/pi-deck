@@ -107,18 +107,17 @@ test.each(["observer", "signal-write"] as const)(
     ];
     const hookFile = path.join(directory, "remove-marker-on-signal.cjs");
     // Reproduce the fastest possible observer deterministically: remove the
-    // enable marker in the child at readiness publication, before the write
-    // returns. A normal fs.watch observer can win this same interprocess race.
+    // enable marker in the child immediately before readiness becomes visible.
+    // A normal fs.watch observer can win this same interprocess race.
     fs.writeFileSync(
       hookFile,
       `const fs = require("node:fs");
 const write = fs.writeFileSync;
 fs.writeFileSync = function(file, ...args) {
-  const result = write.call(this, file, ...args);
   if (file === ${JSON.stringify(signalFile)}) {
     fs.rmSync(${JSON.stringify(enabledFile)}, { force: true });
   }
-  return result;
+  return write.call(this, file, ...args);
 };\n`,
     );
     const client =
