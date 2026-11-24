@@ -198,13 +198,11 @@ async function invokeValidated<TRequest, TResponse>(options: {
  * schema-validated uncertain-receipt outcome instead, while ordinary failures
  * keep the established rejection contract.
  */
-async function invokePrompt(
-  request: ChatPromptRequest,
+async function invokeDeliveryAwareChatCommand(
+  channel: string,
+  request: unknown,
 ): Promise<ChatPromptDeliveryResult> {
-  const rawResponse: unknown = await ipcRenderer.invoke(
-    ipcChannels.chatPrompt,
-    chatPromptRequestSchema.parse(request),
-  );
+  const rawResponse: unknown = await ipcRenderer.invoke(channel, request);
   const response = apiResponseSchema(z.void()).parse(rawResponse);
   if (response.ok) return undefined;
   if (response.error.deliveryStatus === "unknown") {
@@ -340,19 +338,21 @@ const api: PiDeckApi = Object.freeze({
         request: chatSetThinkingRequestSchema.parse(request),
         responseSchema: chatSnapshotSchema,
       }),
-    prompt: (request: ChatPromptRequest) => invokePrompt(request),
+    prompt: (request: ChatPromptRequest) =>
+      invokeDeliveryAwareChatCommand(
+        ipcChannels.chatPrompt,
+        chatPromptRequestSchema.parse(request),
+      ),
     steer: (request: ChatInterventionRequest) =>
-      invokeValidated({
-        channel: ipcChannels.chatSteer,
-        request: chatInterventionRequestSchema.parse(request),
-        responseSchema: z.void(),
-      }),
+      invokeDeliveryAwareChatCommand(
+        ipcChannels.chatSteer,
+        chatInterventionRequestSchema.parse(request),
+      ),
     followUp: (request: ChatInterventionRequest) =>
-      invokeValidated({
-        channel: ipcChannels.chatFollowUp,
-        request: chatInterventionRequestSchema.parse(request),
-        responseSchema: z.void(),
-      }),
+      invokeDeliveryAwareChatCommand(
+        ipcChannels.chatFollowUp,
+        chatInterventionRequestSchema.parse(request),
+      ),
     abort: (request: { runtimeId: string }) =>
       invokeValidated({
         channel: ipcChannels.chatAbort,

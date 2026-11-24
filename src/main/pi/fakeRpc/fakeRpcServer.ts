@@ -48,6 +48,8 @@ interface FakeOptions {
   streamDelayMs: number;
   /** Delay prompt command success after the user turn is already recorded. */
   promptResponseDelayMs: number;
+  /** Hold one accepted prompt response until a test-controlled release file. */
+  promptResponseBarrierDir?: string;
   ignoredCommands: Set<string>;
   failedCommands: Set<string>;
   promptScenario: PromptScenario;
@@ -122,6 +124,8 @@ interface FakeOptions {
   followUpReceiptSignalFile?: string;
   /** Test-only delay before a steering item becomes durable history. */
   consumeSteeringAfterMs: number;
+  /** Delay an accepted intervention response while queue events still flow. */
+  interventionResponseDelayMs: number;
   /**
    * Queue removal is followed by an intentionally stale get_messages result;
    * only the terminal refresh can observe the persisted id-less user turn.
@@ -258,6 +262,7 @@ function parseOptions(argv: string[]): FakeOptions {
     failTaskPromptRecordWhileActive: false,
     exitAfterPromptReceipt: false,
     consumeSteeringAfterMs: 0,
+    interventionResponseDelayMs: 0,
     interventionSnapshotRace: false,
     exitAfterInterventionReceipt: false,
     persistInterventionBeforeExit: false,
@@ -291,6 +296,10 @@ function parseOptions(argv: string[]): FakeOptions {
       index += 1;
     } else if (arg === "--delay-prompt-response-ms") {
       options.promptResponseDelayMs = Number(argv[index + 1] ?? "0");
+      index += 1;
+    } else if (arg === "--prompt-response-barrier-dir") {
+      const barrierDir = argv[index + 1];
+      if (barrierDir) options.promptResponseBarrierDir = barrierDir;
       index += 1;
     } else if (arg === "--ignore-command") {
       options.ignoredCommands.add(argv[index + 1] ?? "");
@@ -427,6 +436,16 @@ function parseOptions(argv: string[]): FakeOptions {
         delay <= MAX_NODE_TIMEOUT_MS
       ) {
         options.consumeSteeringAfterMs = delay;
+      }
+      index += 1;
+    } else if (arg === "--delay-intervention-response-ms") {
+      const delay = Number(argv[index + 1]);
+      if (
+        Number.isSafeInteger(delay) &&
+        delay >= 0 &&
+        delay <= MAX_NODE_TIMEOUT_MS
+      ) {
+        options.interventionResponseDelayMs = delay;
       }
       index += 1;
     } else if (arg === "--intervention-snapshot-race") {
@@ -681,6 +700,8 @@ class FakeRpcServer {
   private currentTimers: NodeJS.Timeout[] = [];
   private forkStateBarrierStarted = false;
   private forkStateBarrierTimer: NodeJS.Timeout | undefined;
+  private promptResponseBarrierUsed = false;
+  private promptResponseBarrierWatcher: fs.FSWatcher | undefined;
   private agentActive = false;
   private currentModel = this.options.collidingModels
     ? "claude-opus-4-5"
@@ -818,6 +839,7 @@ class FakeRpcServer {
       }
     };
     process.once("exit", recordForkExit);
+    process.once("exit", () => this.cancelPromptResponseBarrier());
     // Node's default SIGTERM termination does not reliably run userland exit
     // listeners through every Electron-spawned wrapper. Test barriers can
     // prove mutation occurred after close requested exit but before worker_exit.
@@ -845,6 +867,7 @@ class FakeRpcServer {
             // Test diagnostics must never prevent worker shutdown.
           }
         }
+        this.cancelPromptResponseBarrier();
         for (const timer of this.currentTimers) clearTimeout(timer);
         this.currentTimers = [];
         this.agentActive = false;
@@ -2826,12 +2849,11 @@ class FakeRpcServer {
     } else {
       this.followUp.push(message);
     }
-    this.respond(command.id, kind);
-    this.emitQueueUpdate();
     if (this.options.exitAfterInterventionReceipt) {
-      // The command acknowledgement can have reached Pi while the renderer's
-      // transport dies. Most tests deliberately supply no durable user turn;
-      // the companion persistence mode makes resume reconciliation deterministic.
+      this.emitQueueUpdate();
+      // The fake worker has accepted and reported the queue update, but exits
+      // before its command response. This is a post-dispatch disconnect, so
+      // Deck must preserve an uncertain receipt rather than offer a safe retry.
       if (this.options.persistInterventionBeforeExit) {
         const userMessage: PiMessage = {
           id: `msg_intervention_${this.promptCounter + 1}`,
@@ -2847,6 +2869,26 @@ class FakeRpcServer {
       setTimeout(() => process.exit(42), 25);
       return;
     }
+    if (this.options.interventionResponseDelayMs > 0) {
+      // The first event is emitted before the response deadline. The second
+      // is intentionally released after the late acknowledgement so E2E can
+      // prove queue reconciliation neither retries nor duplicates either kind.
+      this.emitQueueUpdate();
+      this.traceFixture(`intervention-delay:${kind}:queue-before-response`);
+      const timer = setTimeout(() => {
+        this.currentTimers = this.currentTimers.filter(
+          (item) => item !== timer,
+        );
+        this.respond(command.id, kind);
+        this.traceFixture(`intervention-delay:${kind}:response-after-timeout`);
+        this.emitQueueUpdate();
+        this.traceFixture(`intervention-delay:${kind}:queue-after-response`);
+      }, this.options.interventionResponseDelayMs);
+      this.currentTimers.push(timer);
+      return;
+    }
+    this.respond(command.id, kind);
+    this.emitQueueUpdate();
     if (kind === "steer" && this.options.interventionSnapshotRace) {
       this.interventionSnapshotRaceText = message;
       this.interventionSnapshotRaceStage = "awaiting-queued-snapshot";
@@ -3065,6 +3107,14 @@ class FakeRpcServer {
   }
 
   private respondPrompt(id: string | undefined): void {
+    if (
+      this.options.promptResponseBarrierDir !== undefined &&
+      !this.promptResponseBarrierUsed
+    ) {
+      this.promptResponseBarrierUsed = true;
+      this.holdPromptResponseAtBarrier(id);
+      return;
+    }
     if (this.options.promptResponseDelayMs > 0) {
       const timer = setTimeout(() => {
         this.currentTimers = this.currentTimers.filter(
@@ -3076,6 +3126,38 @@ class FakeRpcServer {
       return;
     }
     this.respond(id, "prompt");
+  }
+
+  private holdPromptResponseAtBarrier(id: string | undefined): void {
+    const barrierDir = this.options.promptResponseBarrierDir!;
+    fs.mkdirSync(barrierDir, { recursive: true });
+    fs.writeFileSync(path.join(barrierDir, "prompt-response-held"), "held\n");
+    const releaseFile = path.join(barrierDir, "release-prompt-response");
+    let released = false;
+    const release = (): void => {
+      if (released || !fs.existsSync(releaseFile)) return;
+      released = true;
+      watcher.close();
+      if (this.promptResponseBarrierWatcher === watcher) {
+        this.promptResponseBarrierWatcher = undefined;
+      }
+      this.respond(id, "prompt");
+    };
+    const watcher = fs.watch(barrierDir, release);
+    this.promptResponseBarrierWatcher = watcher;
+    watcher.once("error", () => this.cancelPromptResponseBarrier());
+    // Close the subscribe/check race if the test released before watch started.
+    release();
+  }
+
+  private cancelPromptResponseBarrier(): void {
+    const watcher = this.promptResponseBarrierWatcher;
+    this.promptResponseBarrierWatcher = undefined;
+    try {
+      watcher?.close();
+    } catch {
+      // Test-only watcher cleanup must never impede fake-worker shutdown.
+    }
   }
 
   private respond(
