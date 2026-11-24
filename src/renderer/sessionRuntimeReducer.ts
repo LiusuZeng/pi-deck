@@ -349,10 +349,11 @@ export function reduceRuntimeEvent(
   const eventTurnId = runtimeEventTurnId(event);
   // Pi includes runId on some lifecycle events. When both sides identify a
   // turn, reject a delayed terminal event for an older run. Production builds
-  // that omit this identifier remain inherently ambiguous; their agent_end is
-  // still accepted rather than risking a permanently active valid turn.
+  // that omit this identifier remain inherently ambiguous; their agent_end or
+  // agent_settled is still accepted rather than risking a permanently active
+  // valid turn.
   if (
-    event.type === "agent_end" &&
+    (event.type === "agent_end" || event.type === "agent_settled") &&
     eventTurnId !== undefined &&
     "turnId" in currentLifecycle &&
     currentLifecycle.turnId !== undefined &&
@@ -847,25 +848,41 @@ export function reduceRuntimeEventUnprioritized(
           item.subagentActivity !== undefined,
       );
       if (!hasUnresolvedSubagent) return session;
+      const currentLifecycle = resolveSessionLifecycle(session);
+      const failed =
+        currentLifecycle.phase === "terminal"
+          ? currentLifecycle.outcome === "failed"
+          : session.providerErrorObserved === true ||
+            session.failureKind === "auth-required" ||
+            session.status === "error" ||
+            session.baseState === "error";
+      const aborted =
+        currentLifecycle.phase === "aborting" || session.status === "aborting";
+      // agent_settled is the terminal evidence when Pi has lost the preceding
+      // agent_end. Keep lifecycle canonical so Work and reconciliation cannot
+      // disagree with this otherwise-idle recovery state.
+      const lifecycle = settleLifecycle(
+        currentLifecycle,
+        failed ? "failed" : aborted ? "aborted" : "completed",
+        Date.now(),
+        runtimeEventTurnId(event),
+      );
       const timeline = finalizeUnresolvedSubagentActivities(
         session.timeline,
-        session.status === "aborting",
+        lifecycle.phase === "terminal" && lifecycle.outcome === "aborted",
       );
       const stillWaitingForInput =
         (session.pendingExtensionUiRequests?.length ?? 0) > 0;
-      const authRequired = session.failureKind === "auth-required";
+      const status = lifecycleSessionStatus(lifecycle, stillWaitingForInput);
+      const baseState = lifecycleBaseState(lifecycle, stillWaitingForInput);
+      const terminalOutcome =
+        lifecycle.phase === "terminal" ? lifecycle.outcome : undefined;
       return {
         ...session,
-        status: stillWaitingForInput
-          ? "waiting"
-          : authRequired
-            ? "error"
-            : "idle",
-        baseState: stillWaitingForInput
-          ? "waitingForInput"
-          : authRequired
-            ? "error"
-            : "idle",
+        lifecycle,
+        completedAtMs: lifecycleCompletedAtMs(lifecycle),
+        status,
+        baseState,
         awaitingAgentEnd: false,
         overlays: {
           ...session.overlays,
@@ -876,9 +893,13 @@ export function reduceRuntimeEventUnprioritized(
         },
         subtitle: stillWaitingForInput
           ? "Waiting · extension input required"
-          : authRequired
-            ? "Error · OpenAI authentication verification pending"
-            : "Idle · backend stream settled",
+          : terminalOutcome === "failed"
+            ? session.failureKind === "auth-required"
+              ? "Error · OpenAI authentication verification pending"
+              : "Error · backend stream failed"
+            : terminalOutcome === "aborted"
+              ? "Idle · backend stream aborted"
+              : "Idle · backend stream settled",
         workingStartedAtMs: undefined,
         lastRuntimeEventLabel: "Pi settled the turn",
         updatedAt: "Now",
@@ -1123,12 +1144,22 @@ function settleTerminalTimeline(
                   item.delegatedStatus.children.waiting,
               },
             });
+      const subagentActivity =
+        item.subagentActivity === undefined
+          ? undefined
+          : projectSubagentActivity({
+              toolName: item.title,
+              phase: "terminal",
+              parentInterrupted: outcome === "aborted",
+              previous: item.subagentActivity,
+            });
       return {
         ...item,
         // A late start/update still contributes useful details, but a settled
         // turn must never display a live tool or delegated-parent indicator.
         status: "collapsed",
         ...(delegatedStatus === undefined ? {} : { delegatedStatus }),
+        ...(subagentActivity === undefined ? {} : { subagentActivity }),
       };
     }
     return item;

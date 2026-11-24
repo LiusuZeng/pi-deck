@@ -7,6 +7,8 @@ const ownerDirectoryName = ".pi-deck-metadata-owner";
 const legacyRecoveryDirectoryName = `${ownerDirectoryName}.recovery`;
 const recoveryFencePrefix = "pi-deck-metadata-recovery-v2:";
 const recoveryDirectoryName = `${ownerDirectoryName}.recovery-v2`;
+const recoveryElectionFileName = "active.json";
+const recoveryRetiredElectionFileSuffix = ".retired";
 const ownerFileName = "owner.json";
 const ownerRecordVersion = 1;
 const defaultIncompleteOwnerTimeoutMs = 30_000;
@@ -24,6 +26,8 @@ export interface MetadataOwnershipOptions {
   readonly incompleteOwnerTimeoutMs?: number;
   readonly beforeRecoverStaleLockDirectory?: () => void | Promise<void>;
   readonly afterAcquireRecoveryFence?: () => void | Promise<void>;
+  readonly afterPrepareRecoveryOwnership?: () => void | Promise<void>;
+  readonly afterAcquireRecoveryOwnership?: () => void | Promise<void>;
   readonly beforeRemoveStaleLockDirectory?: () => void | Promise<void>;
 }
 
@@ -147,6 +151,8 @@ export async function acquireMetadataOwnership(
           pidIsRunning,
           incompleteOwnerTimeoutMs,
           afterAcquireRecoveryFence: options.afterAcquireRecoveryFence,
+          afterPrepareRecoveryOwnership: options.afterPrepareRecoveryOwnership,
+          afterAcquireRecoveryOwnership: options.afterAcquireRecoveryOwnership,
           beforeRemoveStaleLockDirectory:
             options.beforeRemoveStaleLockDirectory,
         }),
@@ -256,6 +262,12 @@ interface RecoverStaleLockOptions {
   readonly pidIsRunning: (pid: number, hostname: string) => boolean;
   readonly incompleteOwnerTimeoutMs: number;
   readonly afterAcquireRecoveryFence: (() => void | Promise<void>) | undefined;
+  readonly afterPrepareRecoveryOwnership:
+    | (() => void | Promise<void>)
+    | undefined;
+  readonly afterAcquireRecoveryOwnership:
+    | (() => void | Promise<void>)
+    | undefined;
   readonly beforeRemoveStaleLockDirectory:
     | (() => void | Promise<void>)
     | undefined;
@@ -271,6 +283,8 @@ async function recoverStaleLockDirectory({
   pidIsRunning,
   incompleteOwnerTimeoutMs,
   afterAcquireRecoveryFence,
+  afterPrepareRecoveryOwnership,
+  afterAcquireRecoveryOwnership,
   beforeRemoveStaleLockDirectory,
 }: RecoverStaleLockOptions): Promise<void> {
   await acquireLegacyRecoveryFence(canonicalHome, legacyRecoveryDirectory);
@@ -288,9 +302,11 @@ async function recoverStaleLockDirectory({
     recoveryDirectory,
     recoveryOwner,
     pidIsRunning,
+    afterPrepareRecoveryOwnership,
   });
 
   try {
+    await afterAcquireRecoveryOwnership?.();
     const existing = await readOwnerRecord(ownerFile);
     if (existing !== undefined) {
       if (ownerIsRunning(existing, pidIsRunning, os.hostname())) {
@@ -414,6 +430,9 @@ interface AcquireRecoveryOwnershipOptions {
   readonly recoveryDirectory: string;
   readonly recoveryOwner: MetadataOwnerRecord;
   readonly pidIsRunning: (pid: number, hostname: string) => boolean;
+  readonly afterPrepareRecoveryOwnership:
+    | (() => void | Promise<void>)
+    | undefined;
 }
 
 async function acquireRecoveryOwnership({
@@ -421,68 +440,173 @@ async function acquireRecoveryOwnership({
   recoveryDirectory,
   recoveryOwner,
   pidIsRunning,
+  afterPrepareRecoveryOwnership,
 }: AcquireRecoveryOwnershipOptions): Promise<string> {
-  await fs
-    .mkdir(recoveryDirectory, { recursive: true, mode: 0o700 })
-    .catch((error: unknown) => {
-      if (isErrorCode(error, "EEXIST")) {
-        throw new MetadataOwnershipError(canonicalHome);
-      }
-      throw error;
-    });
-  const recoveryRecord = path.join(
-    recoveryDirectory,
-    `${recoveryOwner.token}.json`,
-  );
+  await fs.mkdir(recoveryDirectory, { recursive: true, mode: 0o700 });
+  const recoveryRecord = path.join(recoveryDirectory, recoveryElectionFileName);
   const temporaryRecoveryRecord = path.join(
     recoveryDirectory,
     `${recoveryOwner.token}.tmp`,
   );
-  await fs.writeFile(
-    temporaryRecoveryRecord,
-    `${JSON.stringify(recoveryOwner, null, 2)}\n`,
-    { encoding: "utf8", flag: "wx", mode: 0o600 },
-  );
 
   try {
-    // A record is immutable and has a unique name. Consequently an observer of
-    // a dead recoverer never needs to unlink a path that a later live recoverer
-    // could publish to, and crash residue cannot permanently block recovery.
-    await fs.link(temporaryRecoveryRecord, recoveryRecord);
-    const entries = await fs.readdir(recoveryDirectory, {
-      withFileTypes: true,
-    });
-    for (const entry of entries) {
-      if (
-        entry.name === path.basename(recoveryRecord) ||
-        entry.name.endsWith(".tmp")
-      ) {
-        continue;
-      }
-      if (!entry.isFile() || !entry.name.endsWith(".json")) {
-        throw new MetadataOwnershipError(canonicalHome);
-      }
-      const existing = await readOwnerRecord(
-        path.join(recoveryDirectory, entry.name),
-      );
-      if (existing === undefined) {
-        throw new MetadataOwnershipError(canonicalHome);
-      }
-      if (ownerIsRunning(existing, pidIsRunning, os.hostname())) {
-        throw new MetadataOwnershipError(canonicalHome, existing);
+    // Complete the unique private record before publishing it. `link` makes
+    // publication to the fixed election name exclusive without exposing a
+    // partially-written active.json if this process crashes during the write.
+    await fs.writeFile(
+      temporaryRecoveryRecord,
+      `${JSON.stringify(recoveryOwner, null, 2)}\n`,
+      { encoding: "utf8", flag: "wx", mode: 0o600 },
+    );
+
+    await afterPrepareRecoveryOwnership?.();
+
+    for (;;) {
+      try {
+        await fs.link(temporaryRecoveryRecord, recoveryRecord);
+        break;
+      } catch (error) {
+        if (!isErrorCode(error, "EEXIST")) throw error;
+        const existing = await readOwnerRecord(recoveryRecord);
+        if (existing === undefined) {
+          // An incomplete or malformed active election is ambiguous. Do not
+          // reclaim it based on age or delete a path another process may still
+          // be writing.
+          throw new MetadataOwnershipError(canonicalHome);
+        }
+        if (ownerIsRunning(existing, pidIsRunning, os.hostname())) {
+          throw new MetadataOwnershipError(canonicalHome, existing);
+        }
+        await retireKnownDeadRecoveryElection({
+          canonicalHome,
+          recoveryRecord,
+          expectedToken: existing.token,
+          pidIsRunning,
+        });
       }
     }
-    return recoveryRecord;
-  } catch (error) {
-    await removeOwnedRecoveryRecord(recoveryRecord, recoveryOwner.token);
-    throw error;
+
+    try {
+      const entries = await fs.readdir(recoveryDirectory, {
+        withFileTypes: true,
+      });
+      for (const entry of entries) {
+        if (
+          entry.name === recoveryElectionFileName ||
+          entry.name.endsWith(".tmp")
+        ) {
+          continue;
+        }
+        if (isRetiredRecoveryElectionFile(entry.name)) {
+          if (!entry.isFile()) {
+            throw new MetadataOwnershipError(canonicalHome);
+          }
+          await removeKnownDeadRetiredRecoveryElection({
+            canonicalHome,
+            retiredRecord: path.join(recoveryDirectory, entry.name),
+            pidIsRunning,
+          });
+          continue;
+        }
+        if (!entry.isFile() || !entry.name.endsWith(".json")) {
+          throw new MetadataOwnershipError(canonicalHome);
+        }
+        const existing = await readOwnerRecord(
+          path.join(recoveryDirectory, entry.name),
+        );
+        if (existing === undefined) {
+          throw new MetadataOwnershipError(canonicalHome);
+        }
+        if (ownerIsRunning(existing, pidIsRunning, os.hostname())) {
+          throw new MetadataOwnershipError(canonicalHome, existing);
+        }
+      }
+      return recoveryRecord;
+    } catch (error) {
+      await removeOwnedRecoveryRecord(recoveryRecord, recoveryOwner.token);
+      throw error;
+    }
   } finally {
+    // A crash before this cleanup leaves only an unpublished private record;
+    // it never represents an elected owner and is intentionally ignored.
     await fs
       .rm(temporaryRecoveryRecord, { force: true })
       .catch((error: unknown) => {
         if (!isErrorCode(error, "ENOENT")) throw error;
       });
   }
+}
+
+function isRetiredRecoveryElectionFile(entryName: string): boolean {
+  return (
+    entryName.startsWith(`${recoveryElectionFileName}.`) &&
+    entryName.endsWith(recoveryRetiredElectionFileSuffix)
+  );
+}
+
+interface RemoveKnownDeadRetiredRecoveryElectionOptions {
+  readonly canonicalHome: string;
+  readonly retiredRecord: string;
+  readonly pidIsRunning: (pid: number, hostname: string) => boolean;
+}
+
+async function removeKnownDeadRetiredRecoveryElection({
+  canonicalHome,
+  retiredRecord,
+  pidIsRunning,
+}: RemoveKnownDeadRetiredRecoveryElectionOptions): Promise<void> {
+  const retired = await readOwnerRecord(retiredRecord);
+  if (
+    retired === undefined ||
+    ownerIsRunning(retired, pidIsRunning, os.hostname())
+  ) {
+    throw new MetadataOwnershipError(canonicalHome, retired);
+  }
+  await fs.rm(retiredRecord, { force: true });
+}
+
+interface RetireKnownDeadRecoveryElectionOptions {
+  readonly canonicalHome: string;
+  readonly recoveryRecord: string;
+  readonly expectedToken: string;
+  readonly pidIsRunning: (pid: number, hostname: string) => boolean;
+}
+
+async function retireKnownDeadRecoveryElection({
+  canonicalHome,
+  recoveryRecord,
+  expectedToken,
+  pidIsRunning,
+}: RetireKnownDeadRecoveryElectionOptions): Promise<void> {
+  const retiredRecord = `${recoveryRecord}.${randomUUID()}.retired`;
+  try {
+    // Rename captures exactly the record we inspected. If another contender
+    // elects itself after that capture, we never unlink its new record.
+    await fs.rename(recoveryRecord, retiredRecord);
+  } catch (error) {
+    if (isErrorCode(error, "ENOENT")) return;
+    throw error;
+  }
+
+  const retired = await readOwnerRecord(retiredRecord);
+  if (
+    retired === undefined ||
+    retired.token !== expectedToken ||
+    ownerIsRunning(retired, pidIsRunning, os.hostname())
+  ) {
+    try {
+      await fs.rename(retiredRecord, recoveryRecord);
+    } catch (error) {
+      if (!isErrorCode(error, "EEXIST")) throw error;
+    }
+    // If a new active election appeared while restoring, retain this record.
+    // It may be live or malformed now; deleting it would turn that ambiguity
+    // into an unsafe recovery. The next contender will fail closed or reclaim
+    // it only after proving that its immutable owner is dead.
+    throw new MetadataOwnershipError(canonicalHome, retired);
+  }
+
+  await fs.rm(retiredRecord, { force: true });
 }
 
 async function removeOwnedRecoveryRecord(

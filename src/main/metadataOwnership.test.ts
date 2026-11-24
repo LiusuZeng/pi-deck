@@ -89,7 +89,7 @@ const path = require("node:path");
 `;
 
 const v2RecoveryAttemptScript = String.raw`
-const [moduleUrl, home] = process.argv.slice(2);
+const [moduleUrl, home, mode] = process.argv.slice(2);
 const { acquireMetadataOwnership } = await import(moduleUrl);
 
 function waitFor(command) {
@@ -110,6 +110,20 @@ try {
       console.log("observed");
       await waitFor("recover");
     },
+    afterPrepareRecoveryOwnership:
+      mode === "hold-prepared"
+        ? async () => {
+            console.log("prepared");
+            await waitFor("continue");
+          }
+        : undefined,
+    afterAcquireRecoveryOwnership:
+      mode === "hold-election"
+        ? async () => {
+            console.log("elected");
+            await waitFor("continue");
+          }
+        : undefined,
     beforeRemoveStaleLockDirectory: async () => {
       console.log("ready");
       await waitFor("remove");
@@ -318,19 +332,24 @@ async function createV2RecoveryAttemptRunner(root: string): Promise<string> {
   return runner;
 }
 
-function spawnV2RecoveryAttempt(runner: string, home: string): ControlledChild {
+function spawnV2RecoveryAttempt(
+  runner: string,
+  home: string,
+  mode?: "hold-election" | "hold-prepared",
+): ControlledChild {
   return spawnControlledChild(process.execPath, [
     "--experimental-strip-types",
     runner,
     pathToFileURL(path.resolve("src/main/metadataOwnership.ts")).href,
     home,
+    ...(mode === undefined ? [] : [mode]),
   ]);
 }
 
 async function waitForChildExit(
   child: ChildProcessWithoutNullStreams,
 ): Promise<void> {
-  if (child.exitCode !== null) return;
+  if (child.exitCode !== null || child.signalCode !== null) return;
   await once(child, "exit");
 }
 
@@ -518,6 +537,182 @@ test("metadata ownership recovers past an abandoned versioned recovery record", 
     } finally {
       await lease.release();
     }
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
+test("metadata ownership reclaims a known-dead recovery election", async () => {
+  const { root, home } = await temporaryHome();
+  const { canonicalHome } = await seedStaleOwner(home);
+  const recoveryDirectory = path.join(canonicalHome, recoveryDirectoryName);
+  const recoveryElection = path.join(recoveryDirectory, "active.json");
+  await fs.mkdir(recoveryDirectory, { mode: 0o700 });
+  await fs.writeFile(
+    recoveryElection,
+    `${JSON.stringify({
+      version: 1,
+      token: "abandoned-election",
+      pid: 99_999_999,
+      hostname: os.hostname(),
+      startedAtMs: Date.now() - 60_000,
+      canonicalHome,
+    })}\n`,
+    { mode: 0o600 },
+  );
+
+  try {
+    const lease = await acquireMetadataOwnership(home, {
+      pidIsRunning: () => false,
+    });
+    await lease.release();
+    await assert.rejects(() => fs.lstat(recoveryElection), { code: "ENOENT" });
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
+test("metadata ownership recovers when a process crashes before publishing its prepared election", async () => {
+  const { root, home } = await temporaryHome();
+  await seedStaleOwner(home);
+  const runner = await createV2RecoveryAttemptRunner(root);
+  const crashed = spawnV2RecoveryAttempt(runner, home, "hold-prepared");
+  const recoveryElection = path.join(
+    home,
+    recoveryDirectoryName,
+    "active.json",
+  );
+
+  try {
+    await waitForChildOutput(crashed, "observed");
+    crashed.child.stdin.write("recover\n");
+    await waitForChildOutput(crashed, "prepared");
+    crashed.child.kill("SIGKILL");
+    await waitForChildExit(crashed.child);
+    await assert.rejects(() => fs.lstat(recoveryElection), { code: "ENOENT" });
+
+    const lease = await acquireMetadataOwnership(home, {
+      pidIsRunning: () => false,
+    });
+    await lease.release();
+  } finally {
+    if (crashed.child.exitCode === null) crashed.child.kill();
+    await waitForChildExit(crashed.child).catch(() => undefined);
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
+test("metadata ownership ignores unpublished recovery-election crash residue", async () => {
+  const { root, home } = await temporaryHome();
+  const { canonicalHome } = await seedStaleOwner(home);
+  const recoveryDirectory = path.join(canonicalHome, recoveryDirectoryName);
+  const unpublishedRecord = path.join(
+    recoveryDirectory,
+    "interrupted-election-write.tmp",
+  );
+  await fs.mkdir(recoveryDirectory, { mode: 0o700 });
+  // A process can crash after writing its private election record but before
+  // atomically linking it to active.json. It was never an elected owner.
+  await fs.writeFile(
+    unpublishedRecord,
+    `${JSON.stringify({
+      version: 1,
+      token: "unpublished-election",
+      pid: 99_999_999,
+      hostname: os.hostname(),
+      startedAtMs: Date.now() - 60_000,
+      canonicalHome,
+    })}\n`,
+    { mode: 0o600 },
+  );
+
+  try {
+    const lease = await acquireMetadataOwnership(home, {
+      pidIsRunning: () => false,
+    });
+    await lease.release();
+    assert.equal(
+      JSON.parse(await fs.readFile(unpublishedRecord, "utf8")).token,
+      "unpublished-election",
+    );
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
+test("metadata ownership recovers from an interruption after retiring a known-dead election", async () => {
+  const { root, home } = await temporaryHome();
+  const { canonicalHome } = await seedStaleOwner(home);
+  const recoveryDirectory = path.join(canonicalHome, recoveryDirectoryName);
+  const retiredRecoveryElection = path.join(
+    recoveryDirectory,
+    "active.json.interrupted.retired",
+  );
+  await fs.mkdir(recoveryDirectory, { mode: 0o700 });
+  // This is the durable state left if a reclaimer is interrupted after its
+  // atomic rename of a dead active election and before its unlink.
+  await fs.writeFile(
+    retiredRecoveryElection,
+    `${JSON.stringify({
+      version: 1,
+      token: "interrupted-dead-election",
+      pid: 99_999_999,
+      hostname: os.hostname(),
+      startedAtMs: Date.now() - 60_000,
+      canonicalHome,
+    })}\n`,
+    { mode: 0o600 },
+  );
+
+  try {
+    const lease = await acquireMetadataOwnership(home, {
+      pidIsRunning: () => false,
+    });
+    await lease.release();
+    await assert.rejects(() => fs.lstat(retiredRecoveryElection), {
+      code: "ENOENT",
+    });
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
+test("metadata ownership preserves a live retired recovery election", async () => {
+  const { root, home } = await temporaryHome();
+  const { canonicalHome } = await seedStaleOwner(home);
+  const recoveryDirectory = path.join(canonicalHome, recoveryDirectoryName);
+  const retiredRecoveryElection = path.join(
+    recoveryDirectory,
+    "active.json.live.retired",
+  );
+  await fs.mkdir(recoveryDirectory, { mode: 0o700 });
+  await fs.writeFile(
+    retiredRecoveryElection,
+    `${JSON.stringify({
+      version: 1,
+      token: "live-retired-election",
+      pid: process.pid,
+      hostname: os.hostname(),
+      startedAtMs: Date.now(),
+      canonicalHome,
+    })}\n`,
+    { mode: 0o600 },
+  );
+
+  try {
+    await assert.rejects(
+      () =>
+        acquireMetadataOwnership(home, {
+          pidIsRunning: (pid) => pid === process.pid,
+        }),
+      (error: unknown) =>
+        error instanceof MetadataOwnershipError &&
+        error.owner?.token === "live-retired-election",
+    );
+    assert.equal(
+      JSON.parse(await fs.readFile(retiredRecoveryElection, "utf8")).token,
+      "live-retired-election",
+    );
   } finally {
     await fs.rm(root, { recursive: true, force: true });
   }
@@ -733,12 +928,12 @@ test("metadata ownership serializes concurrent stale lock recovery", async () =>
   }
 });
 
-test("separate processes allow exactly one simultaneous v2 stale-lock reclaimer", async () => {
+test("separate processes elect one recovery owner before either can remove a stale lock", async () => {
   const { root, home } = await temporaryHome();
   const { lockDirectory, ownerFile } = await seedStaleOwner(home);
   const runner = await createV2RecoveryAttemptRunner(root);
-  const first = spawnV2RecoveryAttempt(runner, home);
-  const second = spawnV2RecoveryAttempt(runner, home);
+  const first = spawnV2RecoveryAttempt(runner, home, "hold-election");
+  const second = spawnV2RecoveryAttempt(runner, home, "hold-election");
 
   try {
     await Promise.all([
@@ -749,8 +944,8 @@ test("separate processes allow exactly one simultaneous v2 stale-lock reclaimer"
     second.child.stdin.write("recover\n");
 
     const winner = await Promise.any([
-      waitForChildOutput(first, "ready").then(() => first),
-      waitForChildOutput(second, "ready").then(() => second),
+      waitForChildOutput(first, "elected").then(() => first),
+      waitForChildOutput(second, "elected").then(() => second),
     ]);
     const blocked = winner === first ? second : first;
     await waitForChildOutput(blocked, "owned");
@@ -759,6 +954,8 @@ test("separate processes allow exactly one simultaneous v2 stale-lock reclaimer"
       "stale-owner",
     );
 
+    winner.child.stdin.write("continue\n");
+    await waitForChildOutput(winner, "ready");
     winner.child.stdin.write("remove\n");
     await waitForChildOutput(winner, "acquired");
     winner.child.stdin.write("release\n");

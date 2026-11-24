@@ -29,12 +29,6 @@ export function createWorkflowRoleRun(
   now = Date.now(),
 ): WorkflowRoleRun {
   const parsed = agentWorkflowDefinitionSchema.parse(definition);
-  for (const item of parsed.nodes) {
-    if (item.role !== "human" && item.execution?.timeoutSeconds !== undefined)
-      throw new Error(
-        "timeoutSeconds is not supported for canonical workflow runs.",
-      );
-  }
   const inputIds = new Set(parsed.inputs.map((input) => input.id));
   for (const key of Object.keys(inputs))
     if (!inputIds.has(key)) throw new Error(`Unknown workflow input: ${key}`);
