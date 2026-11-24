@@ -20,8 +20,9 @@ export function draftDefaultsForWorkspace(
 
 /**
  * Own the asynchronous activation boundary and read defaults only afterwards.
- * The production workspace switch uses this operation to create a draft from
- * the latest workspace-owned defaults rather than a render-time closure.
+ * Workspace switches and New session creation use this operation to create a
+ * draft from the latest workspace-owned defaults rather than a render-time
+ * closure.
  */
 export async function createDraftAfterWorkspaceActivation<
   Activation,

@@ -177,8 +177,9 @@ import { registerValidatedIpc } from "./ipc/registerIpc.js";
 import { coercePreDispatchPromptError } from "./promptDeliveryErrors.js";
 import {
   discoverPiModels,
+  discoverPiRuntimeModelResponses,
   discoverPiRuntimeModels,
-  parsePiRuntimeModelDiscovery,
+  recoverPiRuntimeModelDiscovery,
 } from "./pi/modelDiscovery.js";
 import { JsonlRpcNotificationTimeoutError } from "./pi/jsonlClient.js";
 import { SinglePiAdapter } from "./pi/piAdapter.js";
@@ -6663,28 +6664,75 @@ async function listChatModels(
         // behind the destructive boundary, including after launch resolution.
         assertChatLifecycleOperationActive(operation);
         diagnosticsService.recordError(
-          `Pi runtime model discovery failed; falling back to --list-models: ${error instanceof Error ? error.message : String(error)}`,
+          `Pi runtime model discovery failed; preserving successful RPC fields: ${error instanceof Error ? error.message : String(error)}`,
         );
-        const models = await discoverPiModels(options);
+        const recovered = await recoverPiRuntimeModelDiscovery(
+          error,
+          async () => {
+            diagnosticsService.recordError(
+              "Pi runtime model inventory was unavailable; falling back to --list-models.",
+            );
+            try {
+              const models = await discoverPiModels(options);
+              assertChatLifecycleOperationActive(operation);
+              return models;
+            } catch (fallbackError) {
+              diagnosticsService.recordError(
+                `Pi --list-models fallback failed: ${fallbackError instanceof Error ? fallbackError.message : String(fallbackError)}`,
+              );
+              throw fallbackError;
+            }
+          },
+        );
         assertChatLifecycleOperationActive(operation);
-        return chatListModelsResultSchema.parse({
-          models,
-          thinkingLevels: [],
-        });
+        return chatListModelsResultSchema.parse(recovered);
       }
     });
   }
 
   const adapter = await ensureChatAdapter(store, diagnosticsService);
   const activeRuntimeId = resolveActiveChatRuntimeId(adapter, runtimeId);
-  const [state, modelsResponse, thinkingLevelsResponse] = await Promise.all([
-    adapter.request(activeRuntimeId, "get_state"),
-    adapter.request(activeRuntimeId, "get_available_models"),
-    adapter.request(activeRuntimeId, "get_available_thinking_levels"),
-  ]);
-  return chatListModelsResultSchema.parse(
-    parsePiRuntimeModelDiscovery(state, modelsResponse, thinkingLevelsResponse),
-  );
+  try {
+    return chatListModelsResultSchema.parse(
+      await discoverPiRuntimeModelResponses((command) =>
+        adapter.request(activeRuntimeId, command),
+      ),
+    );
+  } catch (error) {
+    diagnosticsService.recordError(
+      `Active Pi runtime model discovery failed; preserving successful RPC fields: ${error instanceof Error ? error.message : String(error)}`,
+    );
+    return withChatLifecycleOperation(async (operation) => {
+      const recovered = await recoverPiRuntimeModelDiscovery(
+        error,
+        async () => {
+          diagnosticsService.recordError(
+            "Active Pi runtime model inventory was unavailable; falling back to --list-models.",
+          );
+          try {
+            const launch = await resolveRealChatLaunchConfig(store, project);
+            assertChatLifecycleOperationActive(operation);
+            const models = await discoverPiModels({
+              command: launch.effective.config.piBinary,
+              args: launch.effective.workerArgs,
+              cwd: launch.projectCwd,
+              env: launch.effective.config.env,
+              signal: operation.abortController.signal,
+            });
+            assertChatLifecycleOperationActive(operation);
+            return models;
+          } catch (fallbackError) {
+            diagnosticsService.recordError(
+              `Pi --list-models fallback failed: ${fallbackError instanceof Error ? fallbackError.message : String(fallbackError)}`,
+            );
+            throw fallbackError;
+          }
+        },
+      );
+      assertChatLifecycleOperationActive(operation);
+      return chatListModelsResultSchema.parse(recovered);
+    });
+  }
 }
 
 async function listChatCommands(
