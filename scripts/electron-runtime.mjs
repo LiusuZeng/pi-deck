@@ -130,6 +130,71 @@ async function reclaimAbandonedRuntimePreparationLock(lockPath) {
   await rm(abandonedLockPath, { recursive: true, force: true });
 }
 
+async function acquireRuntimePreparationReclaimGuard(guardPath) {
+  return new Promise((resolve, reject) => {
+    let acquired = false;
+    let settled = false;
+    let output = "";
+    const guard = spawn(
+      "/usr/bin/lockf",
+      [
+        // The default lockf mode is exclusive. A shared lock would allow two
+        // stale observers to reclaim different generations concurrently.
+        "-k",
+        "-t",
+        "0",
+        guardPath,
+        "/bin/sh",
+        "-c",
+        "printf '\\n'; exec /bin/cat",
+      ],
+      { stdio: ["pipe", "pipe", "ignore"] },
+    );
+    const exited = new Promise((resolveExit) => {
+      guard.once("exit", resolveExit);
+    });
+
+    function settle(value) {
+      if (!settled) {
+        settled = true;
+        resolve(value);
+      }
+    }
+
+    guard.once("error", (error) => {
+      if (!settled) {
+        settled = true;
+        reject(error);
+      }
+    });
+    guard.stdout.setEncoding("utf8");
+    guard.stdout.on("data", (chunk) => {
+      output += chunk;
+      if (!acquired && output.includes("\n")) {
+        acquired = true;
+        settle(async () => {
+          guard.stdin.end();
+          await exited;
+        });
+      }
+    });
+    guard.once("exit", (code, signal) => {
+      if (!acquired) {
+        if (code === 75) {
+          settle(undefined);
+        } else if (!settled) {
+          settled = true;
+          reject(
+            new Error(
+              `Unable to acquire Pi Deck runtime preparation guard (${code}, ${signal})`,
+            ),
+          );
+        }
+      }
+    });
+  });
+}
+
 async function releaseRuntimePreparationLock(lockPath, token) {
   const owner = await readRuntimePreparationLockOwner(lockPath);
   if (owner?.token === token) {
@@ -141,6 +206,7 @@ async function acquireRuntimePreparationLock(
   lockPath,
   {
     beforePublish = async () => undefined,
+    beforeReclaim = async () => undefined,
     onWait = async () => undefined,
   } = {},
 ) {
@@ -150,41 +216,66 @@ async function acquireRuntimePreparationLock(
     token: randomUUID(),
   };
   const candidatePath = `${lockPath}.candidate-${owner.token}`;
+  const reclaimGuardPath = `${lockPath}.reclaim-guard`;
   let candidatePublicationAttempted = false;
 
   await writeFile(candidatePath, `${JSON.stringify(owner)}\n`, { flag: "wx" });
   try {
     while (true) {
-      try {
-        // link() publishes a fully written, owner-identified lock in one
-        // filesystem operation. mkdir() followed by owner metadata creation
-        // leaves a window where another process can mistake a new lock for an
-        // abandoned one and prepare concurrently.
-        if (!candidatePublicationAttempted) {
-          candidatePublicationAttempted = true;
-          await beforePublish();
-        }
-        await link(candidatePath, lockPath);
-        return async () => releaseRuntimePreparationLock(lockPath, owner.token);
-      } catch (error) {
-        if (error?.code !== "EEXIST") {
-          throw error;
-        }
+      if (!candidatePublicationAttempted) {
+        candidatePublicationAttempted = true;
+        await beforePublish();
       }
 
-      const existingOwner = await readRuntimePreparationLockOwner(lockPath);
-      if (
-        existingOwner?.hostname === owner.hostname &&
-        processIsRunning(existingOwner.pid)
-      ) {
+      const releaseReclaimGuard =
+        await acquireRuntimePreparationReclaimGuard(reclaimGuardPath);
+      if (!releaseReclaimGuard) {
         await onWait();
         await waitForRuntimePreparationLock();
-      } else if (!existingOwner || existingOwner.hostname === owner.hostname) {
-        // A published lock always has complete owner metadata. Therefore an
-        // invalid lock, or one whose local owner PID is gone, cannot be
-        // actively publishing and can be atomically retired by one waiter.
-        await reclaimAbandonedRuntimePreparationLock(lockPath);
-      } else {
+        continue;
+      }
+
+      let shouldWait = false;
+      try {
+        while (true) {
+          try {
+            // link() publishes a fully written, owner-identified lock in one
+            // filesystem operation. mkdir() followed by owner metadata creation
+            // leaves a window where another process can mistake a new lock for
+            // an abandoned one and prepare concurrently.
+            await link(candidatePath, lockPath);
+            return async () =>
+              releaseRuntimePreparationLock(lockPath, owner.token);
+          } catch (error) {
+            if (error?.code !== "EEXIST") {
+              throw error;
+            }
+          }
+
+          const existingOwner = await readRuntimePreparationLockOwner(lockPath);
+          if (
+            existingOwner?.hostname === owner.hostname &&
+            processIsRunning(existingOwner.pid)
+          ) {
+            shouldWait = true;
+            break;
+          }
+          if (!existingOwner || existingOwner.hostname === owner.hostname) {
+            // Keep the exclusive kernel-held guard across stale retirement and
+            // candidate publication, so no stale observer can rename a new
+            // lock generation acquired by another process.
+            await beforeReclaim(existingOwner);
+            await reclaimAbandonedRuntimePreparationLock(lockPath);
+            continue;
+          }
+          shouldWait = true;
+          break;
+        }
+      } finally {
+        await releaseReclaimGuard();
+      }
+
+      if (shouldWait) {
         await onWait();
         await waitForRuntimePreparationLock();
       }
@@ -479,6 +570,7 @@ export async function preparePiDeckElectronExecutable({
   patchBundleIdentity = patchMacOSBundleIdentity,
   runtimeCacheRoot = resolvePiDeckElectronRuntimeCacheRoot(),
   beforeRuntimePreparationLockPublish,
+  beforeRuntimePreparationLockReclaim,
   onRuntimePreparationLockWait,
   afterRuntimePublication = async () => undefined,
 } = {}) {
@@ -626,6 +718,7 @@ export async function preparePiDeckElectronExecutable({
     },
     {
       beforePublish: beforeRuntimePreparationLockPublish,
+      beforeReclaim: beforeRuntimePreparationLockReclaim,
       onWait: onRuntimePreparationLockWait,
     },
   );

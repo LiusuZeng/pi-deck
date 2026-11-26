@@ -276,12 +276,38 @@ test("a completed answer can be saved and reopened after app restart", async () 
       const snapshot = await window.piDeck.chat.getSnapshot();
       await window.piDeck.chat.closeSession({ runtimeId: snapshot.runtimeId });
     });
+    const firstOutputDetail = first.page.getByLabel("Output detail", {
+      exact: true,
+    });
+    await firstOutputDetail
+      .getByRole("button", { name: /^Revision 1\b/ })
+      .click();
+    const firstReview = firstOutputDetail.getByLabel("Review this revision", {
+      exact: true,
+    });
+    await expect(
+      firstReview.getByRole("heading", {
+        name: "Review revision 1",
+        exact: true,
+      }),
+    ).toBeVisible();
+    await expect(
+      firstReview.getByText("Add a rollback section with concrete steps.", {
+        exact: true,
+      }),
+    ).toBeVisible();
     await first.page
       .getByRole("button", { name: "Revise in new session" })
       .click();
     await expect(
-      first.page.getByText(/Revising Kept answer, revision 2/),
+      first.page.getByText(/Revising Kept answer, revision 1/),
     ).toBeVisible();
+    await expect(first.page.getByLabel("Prompt text")).toHaveValue(
+      /Fake response to: Answer worth keeping/,
+    );
+    await expect(first.page.getByLabel("Prompt text")).toHaveValue(
+      /Add a rollback section with concrete steps/,
+    );
     await first.page.getByRole("button", { name: "Send" }).click();
     await expect(
       first.page
@@ -327,7 +353,7 @@ test("a completed answer can be saved and reopened after app restart", async () 
       second.page.getByText("Resumed saved Pi session."),
     ).toBeVisible();
     await expect(
-      second.page.getByText(/Revising Kept answer, revision 2/),
+      second.page.getByText(/Revising Kept answer, revision 1/),
     ).toBeVisible();
     const restartedRevision = await second.page.evaluate(async () => {
       const snapshot = await window.piDeck.chat.getSnapshot();
@@ -398,9 +424,11 @@ test("a completed answer can be saved and reopened after app restart", async () 
     await expect(outputDetail.locator(".saved-answer-content")).toContainText(
       "Add a rollback section with concrete steps.",
     );
-    await expect(
-      outputDetail.getByText("Revision 3 of 3", { exact: true }),
-    ).toBeVisible();
+    const outputMetadata = outputDetail
+      .locator(".saved-answers-header > div > p")
+      .filter({ hasText: "Revision 3 of 3" });
+    await expect(outputMetadata).toHaveCount(1);
+    await expect(outputMetadata).toContainText("Revision 3 of 3");
     const savedIdentity = await second.page.evaluate(async () => {
       const workspace = await window.piDeck.workspaces.getActive();
       if (workspace.activeWorkspace === undefined) {

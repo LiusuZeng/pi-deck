@@ -418,6 +418,24 @@ describe("agentWorkflow workflow contracts", () => {
     );
   });
 
+  it("rejects timeout seconds with migration guidance", () => {
+    const definition = base();
+    definition.nodes[0] = {
+      ...definition.nodes[0],
+      execution: { timeoutSeconds: 60 },
+    } as never;
+    const result = workflowDefinitionSchema.safeParse(definition);
+    expect(result.success).toBe(false);
+    if (result.success) throw new Error("fixture");
+    expect(result.error.issues).toContainEqual(
+      expect.objectContaining({
+        path: ["nodes", 0, "execution", "timeoutSeconds"],
+        message:
+          "Timeout seconds is not supported. Remove timeoutSeconds before saving or importing this workflow.",
+      }),
+    );
+  });
+
   it("enforces ownership, reachability, acyclicity and complete boolean routes", () => {
     const wrongOwner = base();
     wrongOwner.nodes[2] = {

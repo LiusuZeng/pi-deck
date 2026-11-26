@@ -45,6 +45,8 @@ export interface SavedAnswerSummary {
 
 export interface SavedAnswerDetail extends SavedAnswerSummary {
   content: string;
+  /** Current head observed when this detail was read, distinct from the selected source revision. */
+  currentRevisionId: string;
   selectedRevisionId: string;
   selectedDisplayNumber: number;
   revisions: SavedAnswerRevisionSummary[];
@@ -197,6 +199,7 @@ export class SavedAnswerService {
     return {
       ...summary,
       content,
+      currentRevisionId: descriptor.output.currentRevisionId,
       selectedRevisionId: descriptor.revision.revisionId,
       selectedDisplayNumber: descriptor.revision.displayNumber,
       revisions: revisions.map(({ revision, integrity }) => ({
